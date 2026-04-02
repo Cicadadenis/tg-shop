@@ -43,7 +43,12 @@
 
 1. Клонируйте репозиторий
 2. Создайте и активируйте виртуальное окружение
-3. Установите зависимости:
+   
+```bash
+python3 -m venv env && source env/bin/activate
+```
+
+4. Установите зависимости:
 
 ```bash
 pip install -r requirements.txt
