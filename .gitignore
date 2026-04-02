@@ -1,0 +1,21 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual env
+.env/
+venv/
+
+# Local secrets
+.env
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database backups and temp
+*.sqlite-journal
+*.log
