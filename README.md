@@ -49,17 +49,6 @@
 pip install -r requirements.txt
 ```
 
-4. Создайте файл `.env`:
-
-```env
-BOT_TOKEN=your_bot_token_here
-ADMIN_ID=123456789
-```
-
-Примечания:
-- `ADMIN_ID` может быть одним ID или списком через запятую.
-- Если `.env` не задан, бот пытается взять часть параметров из `settings.ini`.
-
 ## Запуск
 
 ```bash
