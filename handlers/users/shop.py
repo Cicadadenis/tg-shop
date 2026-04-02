@@ -374,11 +374,10 @@ async def _render_catalog(callback: CallbackQuery, state: FSMContext) -> None:
         "high": "от 30 001",
     }.get(st["price"], "любая")
     stock_label = "только в наличии" if st["stock_only"] else "любой"
-    brand_label = "любой" if st["brand"] == "all" else st["brand"]
 
     text = (
-        "<b>🛍 Каталог электроники</b>\n"
-        f"<i>Фильтры:</i> Цена: {price_label} | Бренд: {brand_label} | Наличие: {stock_label}"
+        "<b>🗂 Каталог</b>\n"
+        f"<i>Фильтры:</i> Цена: {price_label} | Наличие: {stock_label}"
     )
     await _safe_edit(
         callback.message,
@@ -539,8 +538,7 @@ async def product_open(callback: CallbackQuery) -> None:
         f"<b>{product['name']}</b>\n\n"
         f"💰 Цена: <b>{product['price']} грн</b>\n"
         f"📦 В наличии: <b>{stock_text}</b>\n"
-        f"🏷 Категория: <b>{product['category_name']}</b>\n"
-        f"📱 Бренд: <b>{product['brand'] or '-'}</b>\n\n"
+        f"🏷 Категория: <b>{product['category_name']}</b>\n\n"
         f"Описание:\n{product['description']}"
     )
     in_wishlist = wishlist_has(callback.from_user.id, product_id)
@@ -1432,14 +1430,6 @@ async def admin_add_category(callback: CallbackQuery, state: FSMContext) -> None
 @router.message(AdminAddProduct.name)
 async def admin_add_name(message: Message, state: FSMContext) -> None:
     await state.update_data(name=(message.text or "").strip())
-    await state.set_state(AdminAddProduct.brand)
-    await message.answer("Бренд (или '-'): ")
-
-
-@router.message(AdminAddProduct.brand)
-async def admin_add_brand(message: Message, state: FSMContext) -> None:
-    brand = (message.text or "").strip()
-    await state.update_data(brand="" if brand == "-" else brand)
     await state.set_state(AdminAddProduct.price)
     await message.answer("Цена (число):")
 
@@ -1543,7 +1533,6 @@ async def admin_product_view(callback: CallbackQuery) -> None:
         f"Цена: <b>{product['price']} грн</b>\n"
         f"Остаток: <b>{product['stock']} шт</b>\n"
         f"Категория: <b>{product['category_name']}</b>\n"
-        f"Бренд: <b>{product['brand'] or '-'}</b>\n\n"
         f"{product['description']}"
     )
     await _safe_edit(callback.message, text, reply_markup=admin_product_actions_kb(product_id))

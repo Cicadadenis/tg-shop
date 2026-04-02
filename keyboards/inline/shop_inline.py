@@ -60,7 +60,6 @@ def catalog_kb(products: list[dict], *, page: int, total_pages: int) -> InlineKe
     rows.append(
         [
             InlineKeyboardButton(text="💸 Цена", callback_data="shop:filter:price"),
-            InlineKeyboardButton(text="🏷 Бренд", callback_data="shop:filter:brand"),
         ]
     )
     rows.append(

@@ -4,7 +4,6 @@ from aiogram.fsm.state import State, StatesGroup
 class AdminAddProduct(StatesGroup):
     category = State()
     name = State()
-    brand = State()
     price = State()
     description = State()
     stock = State()
