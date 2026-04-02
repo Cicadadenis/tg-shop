@@ -1095,12 +1095,22 @@ def get_all_user_ids_for_broadcast() -> list[int]:
 def get_shop_stats() -> dict[str, int]:
     with sqlite3.connect(path_to_db) as db:
         products = db.execute("SELECT COUNT(*) FROM storage_shop_products").fetchone()[0]
-        users = db.execute("SELECT COUNT(*) FROM storage_shop_users").fetchone()[0]
+        categories = db.execute("SELECT COUNT(*) FROM storage_shop_categories").fetchone()[0]
+        customers = db.execute("SELECT COUNT(*) FROM storage_shop_users WHERE role='user'").fetchone()[0]
+        admins = db.execute("SELECT COUNT(*) FROM storage_shop_users WHERE role IN ('admin', 'owner')").fetchone()[0]
         orders = db.execute("SELECT COUNT(*) FROM storage_shop_orders").fetchone()[0]
+        orders_new = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status='Новый'").fetchone()[0]
+        orders_inwork = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status IN ('Оплачен', 'Отправлен')").fetchone()[0]
+        orders_archive = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status IN ('Доставлен', 'Отменен')").fetchone()[0]
         revenue = db.execute("SELECT COALESCE(SUM(total_price),0) FROM storage_shop_orders").fetchone()[0]
     return {
         "products": int(products),
-        "users": int(users),
+        "categories": int(categories),
+        "customers": int(customers),
+        "admins": int(admins),
         "orders": int(orders),
+        "orders_new": int(orders_new),
+        "orders_inwork": int(orders_inwork),
+        "orders_archive": int(orders_archive),
         "revenue": int(revenue),
     }

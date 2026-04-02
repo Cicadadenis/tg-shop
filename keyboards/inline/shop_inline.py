@@ -93,17 +93,19 @@ def catalog_kb(products: list[dict], *, page: int, total_pages: int) -> InlineKe
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def product_kb(product_id: int, *, in_wishlist: bool) -> InlineKeyboardMarkup:
+def product_kb(product_id: int, *, in_wishlist: bool, show_cart_button: bool = False) -> InlineKeyboardMarkup:
     wishlist_text = "💔 Убрать из избранного" if in_wishlist else "❤️ В избранное"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🧺 В корзину", callback_data=f"shop:add:{product_id}"),
-                InlineKeyboardButton(text=wishlist_text, callback_data=f"shop:wishlist:toggle:{product_id}"),
-            ],
-            [InlineKeyboardButton(text="⬅ Каталог", callback_data="menu:catalog")],
+    rows = [
+        [
+            InlineKeyboardButton(text="🧺 В корзину", callback_data=f"shop:add:{product_id}"),
+            InlineKeyboardButton(text=wishlist_text, callback_data=f"shop:wishlist:toggle:{product_id}"),
         ]
-    )
+    ]
+    if show_cart_button:
+        rows.append([InlineKeyboardButton(text="🛒 Моя корзина", callback_data="menu:cart")])
+    rows.append([InlineKeyboardButton(text="⬅ Каталог", callback_data="menu:catalog")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def cart_kb(items: list[dict]) -> InlineKeyboardMarkup:
@@ -134,7 +136,7 @@ _INWORK_STATUSES = {"Оплачен", "Отправлен"}
 _ARCHIVE_STATUSES = {"Доставлен", "Отменен"}
 
 
-def orders_menu_kb(*, has_new: bool, has_inwork: bool, has_archive: bool) -> InlineKeyboardMarkup:
+def orders_menu_kb(*, has_new: bool, has_inwork: bool, has_archive: bool, has_receipt_search: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if has_new:
         rows.append([InlineKeyboardButton(text="🔵 Новые", callback_data="menu:orders:new")])
@@ -142,6 +144,8 @@ def orders_menu_kb(*, has_new: bool, has_inwork: bool, has_archive: bool) -> Inl
         rows.append([InlineKeyboardButton(text="🔄 В работе", callback_data="menu:orders:inwork")])
     if has_archive:
         rows.append([InlineKeyboardButton(text="📁 Архив", callback_data="menu:orders:archive")])
+    if has_receipt_search:
+        rows.append([InlineKeyboardButton(text="🧾 Поиск по чеку", callback_data="menu:orders:receipt:search")])
     rows.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -186,6 +190,20 @@ def orders_archive_kb(orders: list[dict]) -> InlineKeyboardMarkup:
         ]
         for order in orders
         if order.get("status_raw", "") in _ARCHIVE_STATUSES
+    ]
+    rows.append([InlineKeyboardButton(text="⬅ К заказам", callback_data="menu:orders")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def orders_list_kb(orders: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{order['order_id']} | {order['total']} грн | {order['status']}",
+                callback_data=f"shop:order:{order['order_id']}",
+            )
+        ]
+        for order in orders
     ]
     rows.append([InlineKeyboardButton(text="⬅ К заказам", callback_data="menu:orders")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -322,8 +340,34 @@ def admin_orders_kb(orders: list[dict]) -> InlineKeyboardMarkup:
         for order in orders
     ]
     rows.append([InlineKeyboardButton(text="🧾 Поиск по чеку", callback_data="admin:orders:receipt:search")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:orders")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_orders_menu_kb(*, has_new: bool, has_inwork: bool, has_archive: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_new:
+        rows.append([InlineKeyboardButton(text="🔵 Новые", callback_data="admin:orders:new")])
+    if has_inwork:
+        rows.append([InlineKeyboardButton(text="🔄 В работе", callback_data="admin:orders:inwork")])
+    if has_archive:
+        rows.append([InlineKeyboardButton(text="📁 Архив", callback_data="admin:orders:archive")])
+    rows.append([InlineKeyboardButton(text="🧾 Поиск по чеку", callback_data="admin:orders:receipt:search")])
     rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def orders_receipt_filter_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏳ На проверке", callback_data="menu:orders:receipt:filter:pending")],
+            [InlineKeyboardButton(text="✅ Подтвержден", callback_data="menu:orders:receipt:filter:approved")],
+            [InlineKeyboardButton(text="❌ Отклонен", callback_data="menu:orders:receipt:filter:rejected")],
+            [InlineKeyboardButton(text="📎 Есть чек", callback_data="menu:orders:receipt:filter:has")],
+            [InlineKeyboardButton(text="🚫 Без чека", callback_data="menu:orders:receipt:filter:none")],
+            [InlineKeyboardButton(text="⬅ Заказы", callback_data="menu:orders")],
+        ]
+    )
 
 
 def admin_orders_receipt_filter_kb() -> InlineKeyboardMarkup:

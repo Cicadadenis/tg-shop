@@ -23,6 +23,7 @@ from utils.db_api.shop import (
     get_admin_new_order_template,
     get_notify_chat_id,
     get_payment_info,
+    get_shop_stats,
     get_user_status_template,
     get_welcome_message,
     is_admin_user,
@@ -44,6 +45,19 @@ dp = router
 
 def _is_admin(user_id: int) -> bool:
     return is_admin_user(user_id)
+
+
+def _get_admin_menu_kb():
+    return admin_menu_inline_kb(maintenance_enabled=is_maintenance())
+
+
+def _get_admin_settings_kb():
+    return admin_settings_inline_kb(
+        cod_enabled=is_payment_enabled("cod"),
+        card_enabled=bool(get_payment_info("card")),
+        applepay_enabled=bool(get_payment_info("applepay")),
+        googlepay_enabled=bool(get_payment_info("googlepay"))
+    )
 
 
 def _admin_settings_text() -> str:
@@ -147,7 +161,7 @@ async def callback_profile(callback: CallbackQuery) -> None:
     )
     profile = get_shop_user_profile(callback.from_user.id)
     user = get_userx(user_id=callback.from_user.id)
-    user_name = callback.from_user.first_name or callback.from_user.username or str(callback.from_user.id)
+    user_name = profile.get("name") or callback.from_user.first_name or callback.from_user.username or str(callback.from_user.id)
     reg_date = profile.get("created_at") or (user[6] if user and len(user) > 6 else "-")
     phone = profile["phone"] if profile["phone"] else "не указан"
     address = profile["address"] if profile["address"] else "не указан"
@@ -208,7 +222,7 @@ async def callback_admin_menu(callback: CallbackQuery) -> None:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
-    await _safe_edit(callback.message, "<b>Админ меню</b>", reply_markup=admin_menu_inline_kb)
+    await _safe_edit(callback.message, "<b>Админ меню</b>", reply_markup=_get_admin_menu_kb())
     await callback.answer()
 
 
@@ -218,12 +232,30 @@ async def callback_admin_bot_info(callback: CallbackQuery) -> None:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
+    stats = get_shop_stats()
+    text = (
+        "<b>📊 Информация о боте</b>\n\n"
+        "<b>Система:</b>\n"
+        f"🤖 ID бота: <code>{callback.bot.id}</code>\n"
+        f"👤 Ваш ID: <code>{callback.from_user.id}</code>\n\n"
+        "<b>Магазин:</b>\n"
+        f"👥 Клиентов: <b>{stats['customers']}</b>\n"
+        f"⚙️ Администраторов: <b>{stats['admins']}</b>\n\n"
+        "<b>Товары:</b>\n"
+        f"📁 Категорий: <b>{stats['categories']}</b>\n"
+        f"📦 Товаров: <b>{stats['products']}</b>\n\n"
+        "<b>Заказы:</b>\n"
+        f"🆕 Новых: <b>{stats['orders_new']}</b>\n"
+        f"⚡ В работе: <b>{stats['orders_inwork']}</b>\n"
+        f"📂 В архиве: <b>{stats['orders_archive']}</b>\n"
+        f"📊 Всего: <b>{stats['orders']}</b>\n\n"
+        f"💰 Выручка: <b>{stats['revenue']:,}</b> грн"
+    )
+
     await _safe_edit(
         callback.message,
-        "<b>Информация о боте</b>\n"
-        f"ID бота: <code>{callback.bot.id}</code>\n"
-        f"Ваш ID: <code>{callback.from_user.id}</code>",
-        reply_markup=admin_menu_inline_kb,
+        text,
+        reply_markup=_get_admin_menu_kb(),
     )
     await callback.answer()
 
@@ -237,7 +269,7 @@ async def callback_admin_settings(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback.message,
         _admin_settings_text(),
-        reply_markup=admin_settings_inline_kb,
+        reply_markup=_get_admin_settings_kb(),
     )
     await callback.answer()
 
@@ -326,7 +358,7 @@ async def set_admin_new_order_tpl(message: Message, state: FSMContext) -> None:
 
     set_admin_new_order_template(text)
     await state.clear()
-    await message.answer("Шаблон уведомления админу обновлен.", reply_markup=admin_settings_inline_kb)
+    await message.answer("Шаблон уведомления админу обновлен.", reply_markup=_get_admin_settings_kb())
 
 
 @router.message(AdminNotifications.user_status_template)
@@ -342,7 +374,7 @@ async def set_user_status_tpl(message: Message, state: FSMContext) -> None:
 
     set_user_status_template(text)
     await state.clear()
-    await message.answer("Шаблон уведомления клиенту обновлен.", reply_markup=admin_settings_inline_kb)
+    await message.answer("Шаблон уведомления клиенту обновлен.", reply_markup=_get_admin_settings_kb())
 
 
 @router.message(AdminNotifications.notify_chat_id)
@@ -355,7 +387,7 @@ async def set_notify_chat(message: Message, state: FSMContext) -> None:
     if text.lower() == "off":
         set_notify_chat_id("")
         await state.clear()
-        await message.answer("Лог-чат отключен.", reply_markup=admin_settings_inline_kb)
+        await message.answer("Лог-чат отключен.", reply_markup=_get_admin_settings_kb())
         return
 
     try:
@@ -366,7 +398,7 @@ async def set_notify_chat(message: Message, state: FSMContext) -> None:
 
     set_notify_chat_id(text)
     await state.clear()
-    await message.answer("Лог-чат сохранен.", reply_markup=admin_settings_inline_kb)
+    await message.answer("Лог-чат сохранен.", reply_markup=_get_admin_settings_kb())
 
 
 @router.callback_query(F.data == "admin:pay:card")
@@ -394,7 +426,7 @@ async def callback_admin_pay_cod_toggle(callback: CallbackQuery) -> None:
     current = is_payment_enabled("cod")
     set_payment_enabled("cod", not current)
     status = "включен" if not current else "выключен"
-    await _safe_edit(callback.message, _admin_settings_text(), reply_markup=admin_settings_inline_kb)
+    await _safe_edit(callback.message, _admin_settings_text(), reply_markup=_get_admin_settings_kb())
     await callback.answer(f"Наложенный платеж {status}")
 
 
@@ -439,7 +471,7 @@ async def set_pay_card(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("card", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("Настройки банковской карты обновлены.", reply_markup=admin_settings_inline_kb)
+    await message.answer("Настройки банковской карты обновлены.", reply_markup=_get_admin_settings_kb())
 
 
 @router.message(AdminPayments.applepay)
@@ -451,7 +483,7 @@ async def set_pay_apple(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("applepay", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("Настройки Apple Pay обновлены.", reply_markup=admin_settings_inline_kb)
+    await message.answer("Настройки Apple Pay обновлены.", reply_markup=_get_admin_settings_kb())
 
 
 @router.message(AdminPayments.googlepay)
@@ -463,4 +495,4 @@ async def set_pay_google(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("googlepay", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("Настройки Google Pay обновлены.", reply_markup=admin_settings_inline_kb)
+    await message.answer("Настройки Google Pay обновлены.", reply_markup=_get_admin_settings_kb())

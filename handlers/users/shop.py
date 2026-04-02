@@ -14,6 +14,7 @@ from keyboards.inline.shop_inline import (
     back_menu_kb,
     admin_order_status_kb,
     admin_orders_receipt_filter_kb,
+    admin_orders_menu_kb,
     admin_orders_kb,
     admin_product_actions_kb,
     admin_products_kb,
@@ -24,6 +25,8 @@ from keyboards.inline.shop_inline import (
     categories_kb,
     checkout_payment_kb,
     orders_archive_kb,
+    orders_list_kb,
+    orders_receipt_filter_kb,
     order_detail_kb,
     orders_inwork_kb,
     orders_menu_kb,
@@ -31,7 +34,7 @@ from keyboards.inline.shop_inline import (
     product_kb,
     wishlist_kb,
 )
-from keyboards.inline.user_inline import main_menu_inline_kb, profile_actions_inline_kb
+from keyboards.inline.user_inline import main_menu_inline_kb, profile_actions_inline_kb, admin_menu_inline_kb
 from utils.db_api.shop import (
     add_to_cart,
     add_admin_user,
@@ -158,6 +161,30 @@ def _order_back_target(status_raw: str) -> str:
     return "menu:orders:new"
 
 
+def _parse_profile_address(address: str) -> tuple[str, str]:
+    # Ожидаемый формат: "г. <город>, отделение: <номер/название>"
+    raw = (address or "").strip()
+    if not raw:
+        return "", ""
+    city = raw
+    branch = ""
+    if "," in raw:
+        left, right = raw.split(",", 1)
+        city = left.replace("г.", "").strip()
+        branch = right.replace("отделение:", "").strip()
+    return city, branch
+
+
+def _split_full_name(name: str) -> tuple[str, str, str]:
+    parts = [p for p in (name or "").strip().split() if p]
+    if not parts:
+        return "", "", ""
+    first_name = parts[0]
+    last_name = parts[1] if len(parts) > 1 else ""
+    middle_name = " ".join(parts[2:]) if len(parts) > 2 else ""
+    return first_name, last_name, middle_name
+
+
 def _orders_for_viewer(user_id: int) -> list[dict]:
     if _is_admin(user_id):
         return list_all_orders(limit=500)
@@ -173,6 +200,18 @@ def _receipt_status_text(order: dict) -> str:
     if status == "rejected":
         return "отклонен"
     return "на проверке"
+
+
+def _filter_orders_by_receipt(orders: list[dict], flt: str) -> tuple[list[dict], str]:
+    if flt == "pending":
+        return [o for o in orders if o.get("receipt_sent") and str(o.get("receipt_review_status", "")).strip().lower() in {"", "pending"}], "⏳ Заказы: чек на проверке"
+    if flt == "approved":
+        return [o for o in orders if str(o.get("receipt_review_status", "")).strip().lower() == "approved"], "✅ Заказы: чек подтвержден"
+    if flt == "rejected":
+        return [o for o in orders if str(o.get("receipt_review_status", "")).strip().lower() == "rejected"], "❌ Заказы: чек отклонен"
+    if flt == "has":
+        return [o for o in orders if o.get("receipt_sent")], "📎 Заказы: с чеком"
+    return [o for o in orders if not o.get("receipt_sent")], "🚫 Заказы: без чека"
 
 
 async def _render_admin_categories(message: Message, viewer_id: int) -> None:
@@ -328,12 +367,12 @@ async def _render_catalog(callback: CallbackQuery, state: FSMContext) -> None:
         "mid": "10 001 - 30 000",
         "high": "от 30 001",
     }.get(st["price"], "любая")
-    stock_label = "только в наличии" if st["stock_only"] else "все"
-    brand_label = st["brand"]
+    stock_label = "только в наличии" if st["stock_only"] else "любой"
+    brand_label = "любой" if st["brand"] == "all" else st["brand"]
 
     text = (
         "<b>🛍 Каталог электроники</b>\n"
-        f"Фильтры: цена={price_label}, бренд={brand_label}, наличие={stock_label}"
+        f"<i>Фильтры:</i> Цена: {price_label} | Бренд: {brand_label} | Наличие: {stock_label}"
     )
     await _safe_edit(
         callback.message,
@@ -572,6 +611,14 @@ async def cart_add(callback: CallbackQuery) -> None:
         return
     product_id = int(callback.data.split(":")[-1])
     ok, text = add_to_cart(callback.from_user.id, product_id, 1)
+    if ok:
+        in_wishlist = wishlist_has(callback.from_user.id, product_id)
+        try:
+            await callback.message.edit_reply_markup(
+                reply_markup=product_kb(product_id, in_wishlist=in_wishlist, show_cart_button=True)
+            )
+        except TelegramBadRequest:
+            pass
     await callback.answer(text, show_alert=not ok)
 
 
@@ -634,6 +681,28 @@ async def checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not get_cart(callback.from_user.id):
         await callback.answer("Корзина пустая", show_alert=True)
         return
+
+    profile = get_user_profile(callback.from_user.id)
+    if profile.get("name") and profile.get("phone") and profile.get("address"):
+        first_name, last_name, middle_name = _split_full_name(profile.get("name", ""))
+        city, branch = _parse_profile_address(profile.get("address", ""))
+        if first_name and last_name and middle_name and city and branch:
+            await state.update_data(
+                first_name=first_name,
+                last_name=last_name,
+                middle_name=middle_name,
+                phone=profile.get("phone", ""),
+                city=city,
+                branch=branch,
+            )
+            await state.set_state(CheckoutForm.payment)
+            await _safe_edit(
+                callback.message,
+                "Данные получателя взяты из личного кабинета.\nВыберите оплату:",
+                reply_markup=checkout_payment_kb(_available_payment_methods()),
+            )
+            await callback.answer()
+            return
 
     await state.set_state(CheckoutForm.first_name)
     await _safe_edit(callback.message, "Введите имя получателя:", reply_markup=back_menu_kb("menu:cart"))
@@ -807,8 +876,46 @@ async def orders_show(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback.message,
         "<b>📦 Мои заказы</b>\nВыберите раздел:",
-        reply_markup=orders_menu_kb(has_new=has_new, has_inwork=has_inwork, has_archive=has_archive),
+        reply_markup=orders_menu_kb(
+            has_new=has_new,
+            has_inwork=has_inwork,
+            has_archive=has_archive,
+            has_receipt_search=True,
+        ),
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:orders:receipt:search")
+async def orders_receipt_search(callback: CallbackQuery) -> None:
+    orders = _orders_for_viewer(callback.from_user.id)
+    if not orders:
+        await callback.answer("Заказов пока нет", show_alert=True)
+        return
+    await _safe_edit(
+        callback.message,
+        "<b>Поиск заказов по чеку</b>\nВыберите фильтр:",
+        reply_markup=orders_receipt_filter_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("menu:orders:receipt:filter:"))
+async def orders_receipt_filter(callback: CallbackQuery) -> None:
+    orders = _orders_for_viewer(callback.from_user.id)
+    flt = callback.data.split(":")[-1]
+    filtered, title = _filter_orders_by_receipt(orders, flt)
+
+    if not filtered:
+        await _safe_edit(
+            callback.message,
+            f"<b>{title}</b>\nНичего не найдено",
+            reply_markup=orders_receipt_filter_kb(),
+        )
+        await callback.answer()
+        return
+
+    await _safe_edit(callback.message, f"<b>{title}</b>", reply_markup=orders_list_kb(filtered))
     await callback.answer()
 
 
@@ -1026,32 +1133,94 @@ async def order_receipt_invalid(message: Message) -> None:
     await message.answer("Отправьте фото чека или PDF файл", reply_markup=back_menu_kb("menu:orders"))
 
 
-@router.callback_query(F.data == "profile:phone")
-async def profile_phone_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(ProfileForm.phone)
-    await _safe_edit(callback.message, "Введите новый телефон:", reply_markup=back_menu_kb("menu:profile"))
+@router.callback_query(F.data == "profile:edit")
+async def profile_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(ProfileForm.first_name)
+    await _safe_edit(callback.message, "Введите имя:", reply_markup=back_menu_kb("menu:profile"))
     await callback.answer()
+
+
+@router.message(ProfileForm.first_name)
+async def profile_first_name_save(message: Message, state: FSMContext) -> None:
+    first_name = (message.text or "").strip()
+    if len(first_name) < 2:
+        await message.answer("Введите корректное имя")
+        return
+    await state.update_data(first_name=first_name)
+    await state.set_state(ProfileForm.last_name)
+    await message.answer("Введите фамилию:")
+
+
+@router.message(ProfileForm.last_name)
+async def profile_last_name_save(message: Message, state: FSMContext) -> None:
+    last_name = (message.text or "").strip()
+    if len(last_name) < 2:
+        await message.answer("Введите корректную фамилию")
+        return
+    await state.update_data(last_name=last_name)
+    await state.set_state(ProfileForm.middle_name)
+    await message.answer("Введите отчество:")
+
+
+@router.message(ProfileForm.middle_name)
+async def profile_middle_name_save(message: Message, state: FSMContext) -> None:
+    middle_name = (message.text or "").strip()
+    if len(middle_name) < 2:
+        await message.answer("Введите корректное отчество")
+        return
+    await state.update_data(middle_name=middle_name)
+    await state.set_state(ProfileForm.phone)
+    await message.answer("Введите телефон:")
 
 
 @router.message(ProfileForm.phone)
 async def profile_phone_save(message: Message, state: FSMContext) -> None:
-    update_user_contacts(message.from_user.id, phone=(message.text or "").strip())
+    phone = (message.text or "").strip()
+    if len(phone) < 7:
+        await message.answer("Некорректный телефон. Введите снова:")
+        return
+    await state.update_data(phone=phone)
+    await state.set_state(ProfileForm.city)
+    await message.answer("Введите город:")
+
+
+@router.message(ProfileForm.city)
+async def profile_city_save(message: Message, state: FSMContext) -> None:
+    city = (message.text or "").strip()
+    if len(city) < 2:
+        await message.answer("Введите корректный город")
+        return
+    await state.update_data(city=city)
+    await state.set_state(ProfileForm.branch)
+    await message.answer("Введите отделение Новой почты:")
+
+
+@router.message(ProfileForm.branch)
+async def profile_branch_save(message: Message, state: FSMContext) -> None:
+    branch = (message.text or "").strip()
+    if len(branch) < 1:
+        await message.answer("Введите отделение Новой почты")
+        return
+
+    data = await state.get_data()
+    full_name = " ".join(
+        part
+        for part in [
+            (data.get("first_name") or "").strip(),
+            (data.get("last_name") or "").strip(),
+            (data.get("middle_name") or "").strip(),
+        ]
+        if part
+    )
+    address = f"г. {data.get('city', '').strip()}, отделение: {branch}"
+    update_user_contacts(
+        message.from_user.id,
+        name=full_name,
+        phone=(data.get("phone") or "").strip(),
+        address=address,
+    )
     await state.clear()
-    await message.answer("Телефон обновлен", reply_markup=profile_actions_inline_kb)
-
-
-@router.callback_query(F.data == "profile:address")
-async def profile_address_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(ProfileForm.address)
-    await _safe_edit(callback.message, "Введите новый адрес:", reply_markup=back_menu_kb("menu:profile"))
-    await callback.answer()
-
-
-@router.message(ProfileForm.address)
-async def profile_address_save(message: Message, state: FSMContext) -> None:
-    update_user_contacts(message.from_user.id, address=(message.text or "").strip())
-    await state.clear()
-    await message.answer("Адрес обновлен", reply_markup=profile_actions_inline_kb)
+    await message.answer("Данные обновлены", reply_markup=profile_actions_inline_kb)
 
 
 @router.callback_query(F.data == "admin:maintenance:toggle")
@@ -1061,6 +1230,10 @@ async def admin_toggle_maintenance(callback: CallbackQuery) -> None:
         return
 
     enabled = toggle_maintenance()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=admin_menu_inline_kb(maintenance_enabled=enabled))
+    except TelegramBadRequest:
+        pass
     await callback.answer("Тех.работы ВКЛ" if enabled else "Тех.работы ВЫКЛ", show_alert=True)
 
 
@@ -1412,7 +1585,47 @@ async def admin_orders(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
-    await _safe_edit(callback.message, "<b>Список заказов</b>", reply_markup=admin_orders_kb(orders))
+    has_new = any(o.get("status_raw", "") in _NEW_STATUSES for o in orders)
+    has_inwork = any(o.get("status_raw", "") in _INWORK_STATUSES for o in orders)
+    has_archive = any(o.get("status_raw", "") in _ARCHIVE_STATUSES for o in orders)
+    await _safe_edit(
+        callback.message,
+        "<b>Список заказов</b>\nВыберите раздел:",
+        reply_markup=admin_orders_menu_kb(has_new=has_new, has_inwork=has_inwork, has_archive=has_archive),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:orders:new")
+async def admin_orders_new(callback: CallbackQuery) -> None:
+    orders = list_all_orders(limit=500)
+    filtered = [o for o in orders if o.get("status_raw", "") in _NEW_STATUSES]
+    if not filtered:
+        await callback.answer("Новых заказов нет", show_alert=True)
+        return
+    await _safe_edit(callback.message, "<b>🔵 Новые заказы</b>", reply_markup=admin_orders_kb(filtered))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:orders:inwork")
+async def admin_orders_inwork(callback: CallbackQuery) -> None:
+    orders = list_all_orders(limit=500)
+    filtered = [o for o in orders if o.get("status_raw", "") in _INWORK_STATUSES]
+    if not filtered:
+        await callback.answer("Заказов в работе нет", show_alert=True)
+        return
+    await _safe_edit(callback.message, "<b>🔄 Заказы в работе</b>", reply_markup=admin_orders_kb(filtered))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:orders:archive")
+async def admin_orders_archive(callback: CallbackQuery) -> None:
+    orders = list_all_orders(limit=500)
+    filtered = [o for o in orders if o.get("status_raw", "") in _ARCHIVE_STATUSES]
+    if not filtered:
+        await callback.answer("Архив пуст", show_alert=True)
+        return
+    await _safe_edit(callback.message, "<b>📁 Архив заказов</b>", reply_markup=admin_orders_kb(filtered))
     await callback.answer()
 
 
@@ -1438,21 +1651,7 @@ async def admin_orders_receipt_filter(callback: CallbackQuery) -> None:
 
     flt = callback.data.split(":")[-1]
     orders = list_all_orders(limit=500)
-    if flt == "pending":
-        filtered = [o for o in orders if o.get("receipt_sent") and str(o.get("receipt_review_status", "")).strip().lower() in {"", "pending"}]
-        title = "⏳ Заказы: чек на проверке"
-    elif flt == "approved":
-        filtered = [o for o in orders if str(o.get("receipt_review_status", "")).strip().lower() == "approved"]
-        title = "✅ Заказы: чек подтвержден"
-    elif flt == "rejected":
-        filtered = [o for o in orders if str(o.get("receipt_review_status", "")).strip().lower() == "rejected"]
-        title = "❌ Заказы: чек отклонен"
-    elif flt == "has":
-        filtered = [o for o in orders if o.get("receipt_sent")]
-        title = "📎 Заказы: с чеком"
-    else:
-        filtered = [o for o in orders if not o.get("receipt_sent")]
-        title = "🚫 Заказы: без чека"
+    filtered, title = _filter_orders_by_receipt(orders, flt)
 
     if not filtered:
         await _safe_edit(

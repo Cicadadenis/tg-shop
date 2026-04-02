@@ -32,8 +32,12 @@ class OrderReceiptForm(StatesGroup):
 
 
 class ProfileForm(StatesGroup):
+    first_name = State()
+    last_name = State()
+    middle_name = State()
     phone = State()
-    address = State()
+    city = State()
+    branch = State()
 
 
 class AdminBroadcast(StatesGroup):

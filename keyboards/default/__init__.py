@@ -1,5 +1,1 @@
-from .main_functions import *
-from .main_settings import *
-from .main_payment import *
-from .main_items import *
-from .menu import *
+# Default keyboards folder is deprecated - use inline keyboards only
