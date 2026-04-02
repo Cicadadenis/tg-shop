@@ -7,28 +7,42 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from data.config import adm, bot_description
 from keyboards.inline.user_inline import (
     admin_settings_inline_kb,
     admin_menu_inline_kb,
+    admin_reply_cancel_kb,
     main_menu_inline_kb,
     profile_actions_inline_kb,
+    support_back_inline_kb,
+    support_menu_inline_kb,
+    support_tickets_list_kb,
+    support_ticket_view_kb,
 )
-from handlers.users.shop_state import AdminNotifications, AdminPayments
+from handlers.users.shop_state import AdminNotifications, AdminPayments, SupportDialog
 from utils.db_api.shop import get_user_profile as get_shop_user_profile
 from utils.db_api.shop import ensure_user
 from utils.db_api.shop import (
+    get_admin_ids,
     get_admin_new_order_template,
     get_notify_chat_id,
     get_payment_info,
+    get_support_admin_ids,
     get_shop_stats,
     get_user_status_template,
     get_welcome_message,
     is_admin_user,
     is_payment_enabled,
     is_maintenance,
+    is_owner_user,
+    is_support_admin,
+    create_support_ticket,
+    get_support_tickets,
+    get_support_ticket,
+    close_support_ticket,
+    delete_old_closed_tickets,
     set_admin_new_order_template,
     set_notify_chat_id,
     set_payment_enabled,
@@ -161,17 +175,19 @@ async def callback_profile(callback: CallbackQuery) -> None:
     )
     profile = get_shop_user_profile(callback.from_user.id)
     user = get_userx(user_id=callback.from_user.id)
-    user_name = profile.get("name") or callback.from_user.first_name or callback.from_user.username or str(callback.from_user.id)
+    username = callback.from_user.first_name or callback.from_user.username or "не указан"
+    full_name = (profile.get("name") or "").strip() or "не заполнено"
     reg_date = profile.get("created_at") or (user[6] if user and len(user) > 6 else "-")
     phone = profile["phone"] if profile["phone"] else "не указан"
     address = profile["address"] if profile["address"] else "не указан"
     profile_text = (
         "<b>👤 Личный кабинет</b>\n"
-        f"ID: <code>{callback.from_user.id}</code>\n"
-        f"Имя: <b>{user_name}</b>\n"
-        f"Телефон: <b>{phone}</b>\n"
-        f"Адрес: <b>{address}</b>\n"
-        f"Регистрация: <b>{reg_date}</b>"
+        f"🆔 ID: <code>{callback.from_user.id}</code>\n"
+        f"🔖 Username: <b>{username}</b>\n"
+        f"🙍 ФИО: <b>{full_name}</b>\n"
+        f"📞 Телефон: <b>{phone}</b>\n"
+        f"📍 Адрес: <b>{address}</b>\n"
+        f"📅 Регистрация: <b>{reg_date}</b>"
     )
 
     await _safe_edit(
@@ -213,6 +229,319 @@ async def callback_profile_back(callback: CallbackQuery) -> None:
         "<b>Главное меню</b>",
         reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:support")
+async def callback_support_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _safe_edit(
+        callback.message,
+        "<b>🛟 Техническая поддержка</b>\n"
+        "Если есть вопрос по заказу или работе бота, напишите нам в поддержку.\n\n"
+        "Мы ответим вам в ближайшее время.",
+        reply_markup=support_menu_inline_kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "support:start")
+async def callback_support_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SupportDialog.user_message)
+    await _safe_edit(
+        callback.message,
+        "🛟 <b>Опишите суть проблемы:</b>",
+        reply_markup=support_back_inline_kb,
+    )
+    await callback.answer()
+
+
+@router.message(SupportDialog.user_message)
+async def support_user_message_send(message: Message, state: FSMContext) -> None:
+    text_body = (message.text or message.caption or "").strip()
+    has_photo = bool(message.photo)
+    has_document = bool(message.document)
+
+    if not text_body and not has_photo and not has_document:
+        await message.answer("Отправьте текст, фото или файл")
+        return
+
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+
+    media_file_id = message.photo[-1].file_id if has_photo else (message.document.file_id if has_document else "")
+    media_type = "photo" if has_photo else ("document" if has_document else "")
+
+    # Save ticket to DB (for media-only messages store a short marker)
+    ticket_text = text_body or ("[фото]" if has_photo else "[файл]")
+    ticket_id = create_support_ticket(
+        user_id,
+        username,
+        first_name,
+        ticket_text,
+        media_file_id=media_file_id,
+        media_type=media_type,
+    )
+
+    support_ids = get_support_admin_ids()
+    if not support_ids:
+        support_ids = get_admin_ids()
+
+    payload_header = (
+        f"<b>🛟 Новое обращение #{ticket_id}</b>\n"
+        f"👤 Клиент: <code>{user_id}</code>\n"
+        f"🔖 Username: <b>{username or '-'}</b>\n"
+        f"🙍 Имя: <b>{first_name or '-'}</b>\n\n"
+        f"💬 Сообщение:\n"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="↩️ Ответить клиенту", callback_data=f"support:reply:{ticket_id}")]]
+    )
+    delivered = 0
+    for admin_id in support_ids:
+        try:
+            if has_photo:
+                await message.bot.send_photo(
+                    int(admin_id),
+                    photo=message.photo[-1].file_id,
+                    caption=payload_header + (text_body or ""),
+                    reply_markup=kb,
+                )
+            elif has_document:
+                await message.bot.send_document(
+                    int(admin_id),
+                    document=message.document.file_id,
+                    caption=payload_header + (text_body or ""),
+                    reply_markup=kb,
+                )
+            else:
+                await message.bot.send_message(int(admin_id), payload_header + text_body, reply_markup=kb)
+            delivered += 1
+        except Exception:
+            pass
+
+    await state.clear()
+    if delivered == 0:
+        await message.answer(
+            "🛟 <b>Ваше обращение принято!</b>\n\nС вами скоро свяжутся.\n\n<i>Тех. поддержка</i>",
+            reply_markup=support_menu_inline_kb,
+        )
+        return
+    await message.answer(
+        "🛟 <b>Ваше обращение принято!</b>\n\nС вами скоро свяжутся.\n\n<i>Тех. поддержка</i>",
+        reply_markup=support_menu_inline_kb,
+    )
+
+
+@router.callback_query(F.data.startswith("support:reply:"))
+async def support_admin_reply_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    if not (is_owner_user(callback.from_user.id) or is_support_admin(callback.from_user.id)):
+        await callback.answer("Вы не назначены в техподдержку", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split(":")[-1])
+    ticket = get_support_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("Обращение не найдено", show_alert=True)
+        return
+
+    target_user_id = ticket["user_id"]
+    first_name = ticket["first_name"] or ticket["username"] or str(target_user_id)
+    await state.set_state(SupportDialog.admin_reply)
+    await state.update_data(support_target_user_id=target_user_id, support_ticket_id=ticket_id)
+    await callback.message.answer(
+        f"✍️ Введите ответ для клиента <b>{first_name}</b> (обращение #{ticket_id}):",
+        reply_markup=admin_reply_cancel_kb,
+    )
+    await callback.answer()
+
+
+@router.message(SupportDialog.admin_reply)
+async def support_admin_reply_send(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    if not (is_owner_user(message.from_user.id) or is_support_admin(message.from_user.id)):
+        await state.clear()
+        await message.answer("Вы не назначены в техподдержку")
+        return
+
+    text_body = (message.text or message.caption or "").strip()
+    has_photo = bool(message.photo)
+    has_document = bool(message.document)
+
+    if not text_body and not has_photo and not has_document:
+        await message.answer("Введите текст, фото или файл для ответа")
+        return
+
+    data = await state.get_data()
+    target_user_id = int(data.get("support_target_user_id", 0) or 0)
+    ticket_id_done = int(data.get("support_ticket_id", 0) or 0)
+    if not target_user_id:
+        await state.clear()
+        await message.answer("Не удалось определить клиента")
+        return
+
+    reply_header = "<b>🛟 Ответ техподдержки</b>\n"
+
+    try:
+        if has_photo:
+            await message.bot.send_photo(
+                target_user_id,
+                photo=message.photo[-1].file_id,
+                caption=reply_header + (text_body or ""),
+                reply_markup=support_menu_inline_kb,
+            )
+        elif has_document:
+            await message.bot.send_document(
+                target_user_id,
+                document=message.document.file_id,
+                caption=reply_header + (text_body or ""),
+                reply_markup=support_menu_inline_kb,
+            )
+        else:
+            await message.bot.send_message(
+                target_user_id,
+                reply_header + text_body,
+                reply_markup=support_menu_inline_kb,
+            )
+    except Exception:
+        await state.clear()
+        await message.answer("❌ Не удалось отправить ответ клиенту")
+        return
+
+    await state.clear()
+    await message.answer(
+        "✅ Ответ отправлен клиенту",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="⬅ К обращениям", callback_data=f"admin:ticket:{ticket_id_done}" if ticket_id_done else "admin:support_tickets"),
+            ]]
+        ),
+    )
+
+
+@router.callback_query(F.data == "admin:support_tickets")
+async def callback_admin_support_tickets(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    tickets = get_support_tickets(status="active")
+    active = len(tickets)
+    closed = len(get_support_tickets(status="closed"))
+
+    if not tickets:
+        text = (
+            "<b>🛟 Обращения в техподдержку</b>\n"
+            f"🟢 Активных: <b>{active}</b>  🔴 Завершенных: <b>{closed}</b>\n\n"
+            "Активных обращений пока нет."
+        )
+    else:
+        text = (
+            f"<b>🛟 Обращения в техподдержку</b>\n"
+            f"🟢 Активных: <b>{active}</b>  🔴 Завершенных: <b>{closed}</b>\n\n"
+            "Выберите активное обращение:"
+        )
+
+    await _safe_edit(callback.message, text, reply_markup=support_tickets_list_kb(tickets, show_closed=False))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:support_tickets:closed")
+async def callback_admin_support_tickets_closed(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    tickets = get_support_tickets(status="closed")
+    active = len(get_support_tickets(status="active"))
+    closed = len(tickets)
+
+    if not tickets:
+        text = (
+            "<b>📁 Завершенные обращения</b>\n"
+            f"🟢 Активных: <b>{active}</b>  🔴 Завершенных: <b>{closed}</b>\n\n"
+            "Завершенных обращений пока нет."
+        )
+    else:
+        text = (
+            "<b>📁 Завершенные обращения</b>\n"
+            f"🟢 Активных: <b>{active}</b>  🔴 Завершенных: <b>{closed}</b>\n\n"
+            "Выберите обращение:"
+        )
+
+    await _safe_edit(callback.message, text, reply_markup=support_tickets_list_kb(tickets, show_closed=True))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:ticket:close:"))
+async def callback_admin_ticket_close(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split(":")[-1])
+    close_support_ticket(ticket_id)
+    await callback.answer("✅ Обращение закрыто")
+
+    ticket = get_support_ticket(ticket_id)
+    if ticket:
+        name = ticket["first_name"] or ticket["username"] or str(ticket["user_id"])
+        status_text = "🔴 Закрыто"
+        text = (
+            f"<b>🛟 Обращение #{ticket_id}</b>\n"
+            f"👤 Клиент: <b>{name}</b> (<code>{ticket['user_id']}</code>)\n"
+            f"📅 Дата: <b>{ticket['created_at']}</b>\n"
+            f"📌 Статус: <b>{status_text}</b>\n\n"
+            f"💬 Сообщение:\n{ticket['message']}"
+        )
+        await _safe_edit(callback.message, text, reply_markup=support_ticket_view_kb(ticket_id, "closed"))
+
+
+@router.callback_query(F.data.startswith("admin:ticket:"))
+async def callback_admin_ticket_view(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    # Skip "admin:ticket:close:" — handled above
+    parts = callback.data.split(":")
+    if len(parts) > 3:
+        return
+
+    ticket_id = int(parts[-1])
+    ticket = get_support_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("Обращение не найдено", show_alert=True)
+        return
+
+    name = ticket["first_name"] or ticket["username"] or str(ticket["user_id"])
+    status_text = "🟢 Активно" if ticket["status"] == "active" else "🔴 Закрыто"
+    text = (
+        f"<b>🛟 Обращение #{ticket_id}</b>\n"
+        f"👤 Клиент: <b>{name}</b> (<code>{ticket['user_id']}</code>)\n"
+        f"📅 Дата: <b>{ticket['created_at']}</b>\n"
+        f"📌 Статус: <b>{status_text}</b>\n\n"
+        f"💬 Сообщение:\n{ticket['message']}"
+    )
+
+    media_file_id = str(ticket.get("media_file_id", "") or "").strip()
+    media_type = str(ticket.get("media_type", "") or "").strip().lower()
+    if media_file_id and media_type in {"photo", "document"}:
+        try:
+            if media_type == "photo":
+                await callback.message.answer_photo(media_file_id, caption=f"🧾 Вложение к обращению #{ticket_id}")
+            else:
+                await callback.message.answer_document(media_file_id, caption=f"🧾 Вложение к обращению #{ticket_id}")
+        except Exception:
+            pass
+
+    await _safe_edit(callback.message, text, reply_markup=support_ticket_view_kb(ticket_id, ticket["status"]))
     await callback.answer()
 
 

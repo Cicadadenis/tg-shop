@@ -177,6 +177,30 @@ def init_shop_tables() -> None:
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_applepay_info', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_googlepay_info', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_cod_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('support_admin_ids', '')")
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_support_tickets(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT DEFAULT '',
+                first_name TEXT DEFAULT '',
+                message TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT,
+                closed_at TEXT DEFAULT '',
+                media_file_id TEXT DEFAULT '',
+                media_type TEXT DEFAULT ''
+            )
+            """
+        )
+        if not _column_exists(db, "storage_support_tickets", "closed_at"):
+            db.execute("ALTER TABLE storage_support_tickets ADD COLUMN closed_at TEXT DEFAULT ''")
+        if not _column_exists(db, "storage_support_tickets", "media_file_id"):
+            db.execute("ALTER TABLE storage_support_tickets ADD COLUMN media_file_id TEXT DEFAULT ''")
+        if not _column_exists(db, "storage_support_tickets", "media_type"):
+            db.execute("ALTER TABLE storage_support_tickets ADD COLUMN media_type TEXT DEFAULT ''")
 
         for category in ["Смартфоны", "Ноутбуки", "Аксессуары", "Запчасти"]:
             db.execute("INSERT OR IGNORE INTO storage_shop_categories(name) VALUES (?)", (category,))
@@ -335,7 +359,16 @@ def ensure_user(telegram_id: int, name: str = "") -> None:
             (telegram_id, name, _now()),
         )
         if name:
-            db.execute("UPDATE storage_shop_users SET name = ? WHERE telegram_id = ?", (name, telegram_id))
+            # Do not overwrite an already saved full name from profile wizard.
+            db.execute(
+                """
+                UPDATE storage_shop_users
+                SET name = ?
+                WHERE telegram_id = ?
+                  AND (name IS NULL OR TRIM(name) = '')
+                """,
+                (name, telegram_id),
+            )
         db.commit()
 
 
@@ -385,6 +418,140 @@ def get_admin_ids() -> list[int]:
             "SELECT telegram_id FROM storage_shop_users WHERE role IN ('owner', 'admin') ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at ASC"
         ).fetchall()
     return [int(row[0]) for row in rows if row and row[0]]
+
+
+def get_support_admin_ids() -> list[int]:
+    raw = get_shop_setting("support_admin_ids", "").strip()
+    if not raw:
+        return []
+    ids: list[int] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if token.isdigit():
+            ids.append(int(token))
+    return ids
+
+
+def is_support_admin(telegram_id: int) -> bool:
+    return int(telegram_id) in set(get_support_admin_ids())
+
+
+def set_support_admin(telegram_id: int, enabled: bool) -> None:
+    user_id = int(telegram_id)
+    profile = get_user_profile(user_id)
+    if profile["role"] not in {"owner", "admin"}:
+        return
+
+    ids = set(get_support_admin_ids())
+    if enabled:
+        ids.add(user_id)
+    else:
+        ids.discard(user_id)
+    value = ",".join(str(i) for i in sorted(ids))
+    set_shop_setting("support_admin_ids", value)
+
+
+def create_support_ticket(
+    user_id: int,
+    username: str,
+    first_name: str,
+    message: str,
+    media_file_id: str = "",
+    media_type: str = "",
+) -> int:
+    with sqlite3.connect(path_to_db) as db:
+        cursor = db.execute(
+            """
+            INSERT INTO storage_support_tickets(
+                user_id, username, first_name, message, status, created_at, media_file_id, media_type
+            ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+            """,
+            (user_id, username or "", first_name or "", message, _now(), media_file_id or "", media_type or ""),
+        )
+        db.commit()
+        return cursor.lastrowid
+
+
+def get_support_tickets(status: str | None = None) -> list[dict]:
+    with sqlite3.connect(path_to_db) as db:
+        if status:
+            rows = db.execute(
+                """
+                SELECT id, user_id, username, first_name, message, status, created_at, media_file_id, media_type
+                FROM storage_support_tickets
+                WHERE status = ?
+                ORDER BY created_at DESC
+                """,
+                (status,),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                """
+                SELECT id, user_id, username, first_name, message, status, created_at, media_file_id, media_type
+                FROM storage_support_tickets
+                ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at DESC
+                """
+            ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "user_id": r[1],
+            "username": r[2] or "",
+            "first_name": r[3] or "",
+            "message": r[4] or "",
+            "status": r[5] or "active",
+            "created_at": r[6] or "",
+            "media_file_id": r[7] or "",
+            "media_type": r[8] or "",
+        }
+        for r in rows
+    ]
+
+
+def get_support_ticket(ticket_id: int) -> dict | None:
+    with sqlite3.connect(path_to_db) as db:
+        r = db.execute(
+            """
+            SELECT id, user_id, username, first_name, message, status, created_at, media_file_id, media_type
+            FROM storage_support_tickets
+            WHERE id = ?
+            """,
+            (ticket_id,),
+        ).fetchone()
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "user_id": r[1],
+        "username": r[2] or "",
+        "first_name": r[3] or "",
+        "message": r[4] or "",
+        "status": r[5] or "active",
+        "created_at": r[6] or "",
+        "media_file_id": r[7] or "",
+        "media_type": r[8] or "",
+    }
+
+
+def close_support_ticket(ticket_id: int) -> None:
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            "UPDATE storage_support_tickets SET status = 'closed', closed_at = ? WHERE id = ?",
+            (_now(), ticket_id),
+        )
+        db.commit()
+
+
+def delete_old_closed_tickets(days: int = 7) -> int:
+    """Delete closed tickets older than `days` days. Returns count deleted."""
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).replace(microsecond=0).isoformat(sep=" ")
+    with sqlite3.connect(path_to_db) as db:
+        cursor = db.execute(
+            "DELETE FROM storage_support_tickets WHERE status = 'closed' AND closed_at != '' AND closed_at <= ?",
+            (cutoff,),
+        )
+        db.commit()
+        return cursor.rowcount
 
 
 def set_user_role(telegram_id: int, role: str, name: str = "") -> None:

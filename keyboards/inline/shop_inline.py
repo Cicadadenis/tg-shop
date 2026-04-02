@@ -389,15 +389,38 @@ def admin_order_status_kb(
     *,
     receipt_pending: bool = False,
     has_receipt: bool = False,
+    current_status_raw: str | None = None,
+    payment_label: str | None = None,
 ) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="Оплачен", callback_data=f"admin:order:status:{order_id}:paid")],
-        [
-            InlineKeyboardButton(text="Отправлен", callback_data=f"admin:order:status:{order_id}:shipped"),
-            InlineKeyboardButton(text="Доставлен", callback_data=f"admin:order:status:{order_id}:done"),
-        ],
-        [InlineKeyboardButton(text="Отменен", callback_data=f"admin:order:status:{order_id}:cancel")],
-    ]
+    status_buttons = {
+        "paid": "✅ Оплачен",
+        "shipped": "🚚 Отправлен",
+        "done": "📦 Доставлен",
+        "cancel": "❌ Отменен",
+    }
+    current_status_key = {
+        "Оплачен": "paid",
+        "Отправлен": "shipped",
+        "Доставлен": "done",
+        "Отменен": "cancel",
+    }.get((current_status_raw or "").strip(), "")
+    is_cod_payment = "налож" in (payment_label or "").strip().lower()
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if current_status_key != "paid" and not is_cod_payment:
+        rows.append([InlineKeyboardButton(text=status_buttons["paid"], callback_data=f"admin:order:status:{order_id}:paid")])
+
+    shipping_row: list[InlineKeyboardButton] = []
+    if current_status_key != "shipped":
+        shipping_row.append(InlineKeyboardButton(text=status_buttons["shipped"], callback_data=f"admin:order:status:{order_id}:shipped"))
+    if current_status_key != "done":
+        shipping_row.append(InlineKeyboardButton(text=status_buttons["done"], callback_data=f"admin:order:status:{order_id}:done"))
+    if shipping_row:
+        rows.append(shipping_row)
+
+    if current_status_key != "cancel":
+        rows.append([InlineKeyboardButton(text=status_buttons["cancel"], callback_data=f"admin:order:status:{order_id}:cancel")])
+
     if receipt_pending:
         rows.append(
             [
@@ -436,9 +459,15 @@ def admin_user_actions_kb(
     is_admin: bool,
     is_owner: bool,
     can_manage_admins: bool,
+    is_support: bool = False,
     back_target: str,
 ) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text="✉️ Написать", callback_data=f"admin:user:msg:{user_id}")]]
+    if can_manage_admins and is_admin and not is_owner:
+        if is_support:
+            rows.append([InlineKeyboardButton(text="🛟 Убрать из техподдержки", callback_data=f"admin:user:support:disable:{user_id}")])
+        else:
+            rows.append([InlineKeyboardButton(text="🛟 Назначить в техподдержку", callback_data=f"admin:user:support:enable:{user_id}")])
     if can_manage_admins and not is_owner:
         if is_admin:
             rows.append([InlineKeyboardButton(text="➖ Убрать из админов", callback_data=f"admin:user:demote:{user_id}")])

@@ -72,3 +72,8 @@ class AdminPayments(StatesGroup):
     card = State()
     applepay = State()
     googlepay = State()
+
+
+class SupportDialog(StatesGroup):
+    user_message = State()
+    admin_reply = State()

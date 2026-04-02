@@ -64,6 +64,7 @@ from utils.db_api.shop import (
     init_shop_tables,
     is_admin_user,
     is_payment_enabled,
+    is_support_admin,
     list_all_orders,
     list_admin_users,
     list_brands,
@@ -73,6 +74,7 @@ from utils.db_api.shop import (
     render_template,
     remove_admin_user,
     save_order_receipt,
+    set_support_admin,
     set_order_receipt_review_status,
     is_maintenance,
     set_welcome_message,
@@ -143,6 +145,8 @@ def _available_payment_methods() -> list[tuple[str, str]]:
 
 
 def _payment_instruction_text(method: str) -> str:
+    if method not in PREPAID_METHODS:
+        return ""
     info = get_payment_info(method)
     if not info:
         return ""
@@ -274,13 +278,14 @@ async def _render_admin_user_card(message: Message, viewer_id: int, target_user_
     profile = get_user_profile(target_user_id)
     back_target = "admin:admins:list" if profile["role"] in {"owner", "admin"} else "admin:users:list"
     text = (
-        "<b>Карточка пользователя</b>\n"
-        f"ID: <code>{profile['telegram_id']}</code>\n"
-        f"Роль: <b>{_role_label(profile['role'])}</b>\n"
-        f"Имя: <b>{profile['name'] or '-'}</b>\n"
-        f"Телефон: <b>{profile['phone'] or '-'}</b>\n"
-        f"Адрес: <b>{profile['address'] or '-'}</b>\n"
-        f"Дата: <b>{profile['created_at'] or '-'}</b>"
+        "<b>👤 Карточка пользователя</b>\n"
+        f"🆔 ID: <code>{profile['telegram_id']}</code>\n"
+        f"🛡 Роль: <b>{_role_label(profile['role'])}</b>\n"
+        f"🙍 ФИО: <b>{profile['name'] or '-'}</b>\n"
+        f"📞 Телефон: <b>{profile['phone'] or '-'}</b>\n"
+        f"📍 Адрес: <b>{profile['address'] or '-'}</b>\n"
+        f"🛟 Техподдержка: <b>{'Да' if is_support_admin(profile['telegram_id']) else 'Нет'}</b>\n"
+        f"📅 Дата: <b>{profile['created_at'] or '-'}</b>"
     )
     await _safe_edit(
         message,
@@ -290,6 +295,7 @@ async def _render_admin_user_card(message: Message, viewer_id: int, target_user_
             is_admin=profile["role"] in {"owner", "admin"},
             is_owner=profile["role"] == "owner",
             can_manage_admins=_is_owner(viewer_id),
+            is_support=is_support_admin(profile["telegram_id"]),
             back_target=back_target,
         ),
     )
@@ -683,26 +689,23 @@ async def checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     profile = get_user_profile(callback.from_user.id)
-    if profile.get("name") and profile.get("phone") and profile.get("address"):
-        first_name, last_name, middle_name = _split_full_name(profile.get("name", ""))
-        city, branch = _parse_profile_address(profile.get("address", ""))
-        if first_name and last_name and middle_name and city and branch:
-            await state.update_data(
-                first_name=first_name,
-                last_name=last_name,
-                middle_name=middle_name,
-                phone=profile.get("phone", ""),
-                city=city,
-                branch=branch,
-            )
-            await state.set_state(CheckoutForm.payment)
-            await _safe_edit(
-                callback.message,
-                "Данные получателя взяты из личного кабинета.\nВыберите оплату:",
-                reply_markup=checkout_payment_kb(_available_payment_methods()),
-            )
-            await callback.answer()
-            return
+    profile_name = (profile.get("name") or "").strip()
+    profile_phone = (profile.get("phone") or "").strip()
+    profile_address = (profile.get("address") or "").strip()
+    if profile_name and profile_phone and profile_address:
+        await state.update_data(
+            profile_name=profile_name,
+            profile_phone=profile_phone,
+            profile_address=profile_address,
+        )
+        await state.set_state(CheckoutForm.payment)
+        await _safe_edit(
+            callback.message,
+            "Данные получателя взяты из личного кабинета.\nВыберите оплату:",
+            reply_markup=checkout_payment_kb(_available_payment_methods()),
+        )
+        await callback.answer()
+        return
 
     await state.set_state(CheckoutForm.first_name)
     await _safe_edit(callback.message, "Введите имя получателя:", reply_markup=back_menu_kb("menu:cart"))
@@ -789,7 +792,11 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    full_name = " ".join(
+    profile_name = (data.get("profile_name") or "").strip()
+    profile_phone = (data.get("profile_phone") or "").strip()
+    profile_address = (data.get("profile_address") or "").strip()
+
+    full_name = profile_name or " ".join(
         part for part in [
             (data.get("first_name") or "").strip(),
             (data.get("last_name") or "").strip(),
@@ -797,11 +804,18 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
         ]
         if part
     )
-    delivery_address = f"г. {data.get('city', '')}, отделение: {data.get('branch', '')}".strip().strip(",")
+    delivery_address = profile_address or f"г. {data.get('city', '')}, отделение: {data.get('branch', '')}".strip().strip(",")
+    phone = profile_phone or (data.get("phone") or "").strip()
+
+    if not full_name or not phone or not delivery_address:
+        await state.clear()
+        await callback.answer("Не хватает данных профиля. Заполните профиль и повторите.", show_alert=True)
+        return
+
     ok, payload = create_order_from_cart(
         callback.from_user.id,
         name=full_name,
-        phone=data.get("phone", ""),
+        phone=phone,
         address=delivery_address,
         delivery=DELIVERY_NOVA,
         payment=payment,
@@ -831,7 +845,12 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.bot.send_message(
                     int(admin_id),
                     admin_message,
-                    reply_markup=admin_order_status_kb(order["order_id"], order["user_id"], has_receipt=False),
+                    reply_markup=admin_order_status_kb(
+                        order["order_id"],
+                        order["user_id"],
+                        has_receipt=False,
+                        payment_label=order.get("payment", ""),
+                    ),
                 )
             except Exception:
                 pass
@@ -842,7 +861,12 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.bot.send_message(
                     int(notify_chat_id),
                     admin_message,
-                    reply_markup=admin_order_status_kb(order["order_id"], order["user_id"], has_receipt=False),
+                    reply_markup=admin_order_status_kb(
+                        order["order_id"],
+                        order["user_id"],
+                        has_receipt=False,
+                        payment_label=order.get("payment", ""),
+                    ),
                 )
             except Exception:
                 pass
@@ -980,15 +1004,15 @@ async def order_open(callback: CallbackQuery) -> None:
     lines = [f"• {item['title']} — {item['quantity']} x {item['price']} грн" for item in items]
     if viewer_is_admin:
         text = (
-            f"<b>Заказ {order_id}</b>\n"
-            f"Статус: <b>{order['status']}</b>\n"
-            f"Клиент: <b>{order['name']}</b>\n"
-            f"Телефон: <b>{order['phone']}</b>\n"
-            f"Адрес: <b>{order['address']}</b>\n"
-            f"Доставка: <b>{order['delivery']}</b>\n"
-            f"Оплата: <b>{order['payment']}</b>\n"
-            f"Чек: <b>{_receipt_status_text(order)}</b>\n"
-            f"Итого: <b>{order['total']} грн</b>\n\n"
+            f"<b>📦 Заказ {order_id}</b>\n"
+            f"📌 Статус: <b>{order['status']}</b>\n"
+            f"👤 Клиент: <b>{order['name']}</b>\n"
+            f"📞 Телефон: <b>{order['phone']}</b>\n"
+            f"📍 Адрес: <b>{order['address']}</b>\n"
+            f"🚚 Доставка: <b>{order['delivery']}</b>\n"
+            f"💳 Оплата: <b>{order['payment']}</b>\n"
+            f"🧾 Чек: <b>{_receipt_status_text(order)}</b>\n"
+            f"💰 Итого: <b>{order['total']} грн</b>\n\n"
             f"{chr(10).join(lines)}"
         )
         receipt_pending = bool(order.get("receipt_sent", False)) and str(order.get("receipt_review_status", "")).strip().lower() in {"", "pending"}
@@ -997,15 +1021,17 @@ async def order_open(callback: CallbackQuery) -> None:
             order["user_id"],
             receipt_pending=receipt_pending,
             has_receipt=bool(order.get("receipt_sent", False)),
+            current_status_raw=order.get("status_raw", ""),
+            payment_label=order.get("payment", ""),
         )
     else:
         text = (
-            f"<b>Заказ {order_id}</b>\n"
-            f"Статус: <b>{order['status']}</b>\n"
-            f"Доставка: <b>{order['delivery']}</b>\n"
-            f"Оплата: <b>{order['payment']}</b>\n"
-            f"Чек: <b>{_receipt_status_text(order)}</b>\n"
-            f"Итого: <b>{order['total']} грн</b>\n\n"
+            f"<b>📦 Заказ {order_id}</b>\n"
+            f"📌 Статус: <b>{order['status']}</b>\n"
+            f"🚚 Доставка: <b>{order['delivery']}</b>\n"
+            f"💳 Оплата: <b>{order['payment']}</b>\n"
+            f"🧾 Чек: <b>{_receipt_status_text(order)}</b>\n"
+            f"💰 Итого: <b>{order['total']} грн</b>\n\n"
             f"{chr(10).join(lines)}"
         )
         raw = order.get("status_raw", "")
@@ -1066,7 +1092,13 @@ async def order_receipt_photo(message: Message, state: FSMContext) -> None:
         f"Клиент: {message.from_user.id}\n"
         f"Оплата: <b>{order['payment'] if order else '-'}</b>"
     )
-    admin_kb = admin_order_status_kb(order_id, order["user_id"] if order else None, receipt_pending=True, has_receipt=True)
+    admin_kb = admin_order_status_kb(
+        order_id,
+        order["user_id"] if order else None,
+        receipt_pending=True,
+        has_receipt=True,
+        payment_label=order.get("payment", "") if order else "",
+    )
     for admin_id in get_admin_ids():
         try:
             await message.bot.send_photo(int(admin_id), file_id, caption=caption, reply_markup=admin_kb)
@@ -1111,7 +1143,13 @@ async def order_receipt_pdf(message: Message, state: FSMContext) -> None:
         f"Клиент: {message.from_user.id}\n"
         f"Оплата: <b>{order['payment'] if order else '-'}</b>"
     )
-    admin_kb = admin_order_status_kb(order_id, order["user_id"] if order else None, receipt_pending=True, has_receipt=True)
+    admin_kb = admin_order_status_kb(
+        order_id,
+        order["user_id"] if order else None,
+        receipt_pending=True,
+        has_receipt=True,
+        payment_label=order.get("payment", "") if order else "",
+    )
     for admin_id in get_admin_ids():
         try:
             await message.bot.send_document(int(admin_id), doc.file_id, caption=caption, reply_markup=admin_kb)
@@ -1677,15 +1715,15 @@ async def admin_order_view(callback: CallbackQuery) -> None:
     items = get_order_items(order_id)
     lines = [f"• {i['title']} — {i['quantity']} x {i['price']} грн" for i in items]
     text = (
-        f"<b>Заказ {order_id}</b>\n"
-        f"Статус: <b>{order['status']}</b>\n"
-        f"Клиент: <b>{order['name']}</b>\n"
-        f"Телефон: <b>{order['phone']}</b>\n"
-        f"Адрес: <b>{order['address']}</b>\n"
-        f"Доставка: <b>{order['delivery']}</b>\n"
-        f"Оплата: <b>{order['payment']}</b>\n"
-        f"Чек: <b>{_receipt_status_text(order)}</b>\n"
-        f"Итого: <b>{order['total']} грн</b>\n\n"
+        f"<b>📦 Заказ {order_id}</b>\n"
+        f"📌 Статус: <b>{order['status']}</b>\n"
+        f"👤 Клиент: <b>{order['name']}</b>\n"
+        f"📞 Телефон: <b>{order['phone']}</b>\n"
+        f"📍 Адрес: <b>{order['address']}</b>\n"
+        f"🚚 Доставка: <b>{order['delivery']}</b>\n"
+        f"💳 Оплата: <b>{order['payment']}</b>\n"
+        f"🧾 Чек: <b>{_receipt_status_text(order)}</b>\n"
+        f"💰 Итого: <b>{order['total']} грн</b>\n\n"
         f"{chr(10).join(lines)}"
     )
     receipt_pending = bool(order.get("receipt_sent", False)) and str(order.get("receipt_review_status", "")).strip().lower() in {"", "pending"}
@@ -1697,6 +1735,8 @@ async def admin_order_view(callback: CallbackQuery) -> None:
             order["user_id"],
             receipt_pending=receipt_pending,
             has_receipt=bool(order.get("receipt_sent", False)),
+            current_status_raw=order.get("status_raw", ""),
+            payment_label=order.get("payment", ""),
         ),
     )
     await callback.answer()
@@ -1713,15 +1753,15 @@ async def admin_order_status(callback: CallbackQuery) -> None:
     items = get_order_items(order_id)
     lines = [f"• {i['title']} — {i['quantity']} x {i['price']} грн" for i in items]
     text = (
-        f"<b>Заказ {order_id}</b>\n"
-        f"Статус: <b>{order['status']}</b>\n"
-        f"Клиент: <b>{order['name']}</b>\n"
-        f"Телефон: <b>{order['phone']}</b>\n"
-        f"Адрес: <b>{order['address']}</b>\n"
-        f"Доставка: <b>{order['delivery']}</b>\n"
-        f"Оплата: <b>{order['payment']}</b>\n"
-        f"Чек: <b>{_receipt_status_text(order)}</b>\n"
-        f"Итого: <b>{order['total']} грн</b>\n\n"
+        f"<b>📦 Заказ {order_id}</b>\n"
+        f"📌 Статус: <b>{order['status']}</b>\n"
+        f"👤 Клиент: <b>{order['name']}</b>\n"
+        f"📞 Телефон: <b>{order['phone']}</b>\n"
+        f"📍 Адрес: <b>{order['address']}</b>\n"
+        f"🚚 Доставка: <b>{order['delivery']}</b>\n"
+        f"💳 Оплата: <b>{order['payment']}</b>\n"
+        f"🧾 Чек: <b>{_receipt_status_text(order)}</b>\n"
+        f"💰 Итого: <b>{order['total']} грн</b>\n\n"
         f"{chr(10).join(lines)}"
     )
     receipt_pending = bool(order.get("receipt_sent", False)) and str(order.get("receipt_review_status", "")).strip().lower() in {"", "pending"}
@@ -1733,6 +1773,8 @@ async def admin_order_status(callback: CallbackQuery) -> None:
             order["user_id"],
             receipt_pending=receipt_pending,
             has_receipt=bool(order.get("receipt_sent", False)),
+            current_status_raw=order.get("status_raw", ""),
+            payment_label=order.get("payment", ""),
         ),
     )
 
@@ -1756,7 +1798,7 @@ async def admin_order_status(callback: CallbackQuery) -> None:
     except Exception:
         pass
 
-    await callback.answer(f"Статус -> {order['status']}")
+    await callback.answer(f"📌 Статус обновлен: {order['status']}")
 
 
 @router.callback_query(F.data.startswith("admin:order:receipt:"))
@@ -1820,15 +1862,15 @@ async def admin_order_receipt_review(callback: CallbackQuery) -> None:
     items = get_order_items(order_id)
     lines = [f"• {i['title']} — {i['quantity']} x {i['price']} грн" for i in items]
     text = (
-        f"<b>Заказ {order_id}</b>\n"
-        f"Статус: <b>{order['status']}</b>\n"
-        f"Клиент: <b>{order['name']}</b>\n"
-        f"Телефон: <b>{order['phone']}</b>\n"
-        f"Адрес: <b>{order['address']}</b>\n"
-        f"Доставка: <b>{order['delivery']}</b>\n"
-        f"Оплата: <b>{order['payment']}</b>\n"
-        f"Чек: <b>{_receipt_status_text(order)}</b>\n"
-        f"Итого: <b>{order['total']} грн</b>\n\n"
+        f"<b>📦 Заказ {order_id}</b>\n"
+        f"📌 Статус: <b>{order['status']}</b>\n"
+        f"👤 Клиент: <b>{order['name']}</b>\n"
+        f"📞 Телефон: <b>{order['phone']}</b>\n"
+        f"📍 Адрес: <b>{order['address']}</b>\n"
+        f"🚚 Доставка: <b>{order['delivery']}</b>\n"
+        f"💳 Оплата: <b>{order['payment']}</b>\n"
+        f"🧾 Чек: <b>{_receipt_status_text(order)}</b>\n"
+        f"💰 Итого: <b>{order['total']} грн</b>\n\n"
         f"{chr(10).join(lines)}"
     )
     await _safe_edit(
@@ -1839,6 +1881,8 @@ async def admin_order_receipt_review(callback: CallbackQuery) -> None:
             order["user_id"],
             receipt_pending=False,
             has_receipt=bool(order.get("receipt_sent", False)),
+            current_status_raw=order.get("status_raw", ""),
+            payment_label=order.get("payment", ""),
         ),
     )
 
@@ -1954,6 +1998,30 @@ async def admin_user_demote(callback: CallbackQuery) -> None:
 
     await _render_admin_user_card(callback.message, callback.from_user.id, target_user_id)
     await callback.answer("Админ снят")
+
+
+@router.callback_query(F.data.startswith("admin:user:support:enable:"))
+async def admin_user_support_enable(callback: CallbackQuery) -> None:
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Только главный админ может назначать техподдержку", show_alert=True)
+        return
+
+    target_user_id = int(callback.data.split(":")[-1])
+    set_support_admin(target_user_id, True)
+    await _render_admin_user_card(callback.message, callback.from_user.id, target_user_id)
+    await callback.answer("Назначен в техподдержку")
+
+
+@router.callback_query(F.data.startswith("admin:user:support:disable:"))
+async def admin_user_support_disable(callback: CallbackQuery) -> None:
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Только главный админ может назначать техподдержку", show_alert=True)
+        return
+
+    target_user_id = int(callback.data.split(":")[-1])
+    set_support_admin(target_user_id, False)
+    await _render_admin_user_card(callback.message, callback.from_user.id, target_user_id)
+    await callback.answer("Убран из техподдержки")
 
 
 @router.callback_query(F.data.startswith("admin:user:msg:"))
