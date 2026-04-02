@@ -180,6 +180,8 @@ async def callback_profile(callback: CallbackQuery) -> None:
     reg_date = profile.get("created_at") or (user[6] if user and len(user) > 6 else "-")
     phone = profile["phone"] if profile["phone"] else "не указан"
     address = profile["address"] if profile["address"] else "не указан"
+    bonus = profile.get("bonus", 0)
+    bonus_line = f"🎁 Бонус: <b>{bonus} грн</b>\n" if bonus > 0 else ""
     profile_text = (
         "<b>👤 Личный кабинет</b>\n"
         f"🆔 ID: <code>{callback.from_user.id}</code>\n"
@@ -187,6 +189,7 @@ async def callback_profile(callback: CallbackQuery) -> None:
         f"🙍 ФИО: <b>{full_name}</b>\n"
         f"📞 Телефон: <b>{phone}</b>\n"
         f"📍 Адрес: <b>{address}</b>\n"
+        f"{bonus_line}"
         f"📅 Регистрация: <b>{reg_date}</b>"
     )
 

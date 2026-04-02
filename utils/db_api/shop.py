@@ -62,6 +62,8 @@ def init_shop_tables() -> None:
         )
         if not _column_exists(db, "storage_shop_users", "role"):
             db.execute("ALTER TABLE storage_shop_users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+        if not _column_exists(db, "storage_shop_users", "bonus"):
+            db.execute("ALTER TABLE storage_shop_users ADD COLUMN bonus INTEGER NOT NULL DEFAULT 0")
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS storage_shop_categories(
@@ -178,6 +180,9 @@ def init_shop_tables() -> None:
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_googlepay_info', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_cod_enabled', '1')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('support_admin_ids', '')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_nova_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_city_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_pickup_enabled', '1')")
 
         db.execute(
             """
@@ -202,8 +207,19 @@ def init_shop_tables() -> None:
         if not _column_exists(db, "storage_support_tickets", "media_type"):
             db.execute("ALTER TABLE storage_support_tickets ADD COLUMN media_type TEXT DEFAULT ''")
 
-        for category in ["Смартфоны", "Ноутбуки", "Аксессуары", "Запчасти"]:
-            db.execute("INSERT OR IGNORE INTO storage_shop_categories(name) VALUES (?)", (category,))
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_product_ratings(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                rating INTEGER NOT NULL,
+                created_at TEXT,
+                UNIQUE(order_id, product_id)
+            )
+            """
+        )
 
         from data.config import adm, sozdatel
 
@@ -255,6 +271,15 @@ def get_welcome_message() -> tuple[str, str]:
 def set_welcome_message(text: str, photo: str = "") -> None:
     set_shop_setting("welcome_text", text)
     set_shop_setting("welcome_photo", photo)
+
+
+def get_delivery_settings() -> dict[str, bool]:
+    """Возвращает словарь вида {'nova': True, 'city': True, 'pickup': True}."""
+    return {
+        "nova": get_shop_setting("delivery_nova_enabled", "1") == "1",
+        "city": get_shop_setting("delivery_city_enabled", "1") == "1",
+        "pickup": get_shop_setting("delivery_pickup_enabled", "1") == "1",
+    }
 
 
 def is_maintenance() -> bool:
@@ -388,7 +413,7 @@ def get_user_profile(telegram_id: int) -> dict[str, Any]:
     ensure_user(telegram_id)
     with sqlite3.connect(path_to_db) as db:
         row = db.execute(
-            "SELECT telegram_id, name, phone, address, created_at, role FROM storage_shop_users WHERE telegram_id = ?",
+            "SELECT telegram_id, name, phone, address, created_at, role, bonus FROM storage_shop_users WHERE telegram_id = ?",
             (telegram_id,),
         ).fetchone()
 
@@ -399,7 +424,54 @@ def get_user_profile(telegram_id: int) -> dict[str, Any]:
         "address": row[3] or "",
         "created_at": row[4] or "",
         "role": row[5] or "user",
+        "bonus": int(row[6]) if row[6] else 0,
     }
+
+
+def get_user_bonus(user_id: int) -> int:
+    ensure_user(user_id)
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            "SELECT bonus FROM storage_shop_users WHERE telegram_id = ?", (user_id,)
+        ).fetchone()
+    return int(row[0]) if row and row[0] else 0
+
+
+def set_user_bonus(user_id: int, amount: int) -> None:
+    ensure_user(user_id)
+    amount = max(0, int(amount))
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            "UPDATE storage_shop_users SET bonus = ? WHERE telegram_id = ?",
+            (amount, user_id),
+        )
+        db.commit()
+
+
+def save_product_rating(order_id: str, user_id: int, product_id: int, rating: int) -> bool:
+    """Save rating. Returns True if saved, False if already rated."""
+    try:
+        with sqlite3.connect(path_to_db) as db:
+            db.execute(
+                "INSERT OR IGNORE INTO storage_product_ratings(order_id, user_id, product_id, rating, created_at) VALUES (?, ?, ?, ?, ?)",
+                (order_id, user_id, product_id, rating, _now()),
+            )
+            db.commit()
+        return True
+    except Exception:
+        return False
+
+
+def get_product_rating(product_id: int) -> dict[str, Any]:
+    """Returns {avg: float, count: int}."""
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            "SELECT AVG(rating), COUNT(*) FROM storage_product_ratings WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()
+    avg = round(float(row[0]), 1) if row and row[0] is not None else 0.0
+    count = int(row[1]) if row else 0
+    return {"avg": avg, "count": count}
 
 
 def is_admin_user(telegram_id: int) -> bool:
@@ -1022,12 +1094,12 @@ def cart_total(user_id: int) -> int:
     return sum(item["sum"] for item in get_cart(user_id))
 
 
-def create_order_from_cart(user_id: int, *, name: str, phone: str, address: str, delivery: str, payment: str) -> tuple[bool, str]:
+def create_order_from_cart(user_id: int, *, name: str, phone: str, address: str, delivery: str, payment: str, discount: int = 0) -> tuple[bool, str]:
     cart = get_cart(user_id)
     if not cart:
         return False, "Корзина пустая"
 
-    total = sum(item["sum"] for item in cart)
+    total = max(1, sum(item["sum"] for item in cart) - int(discount))
 
     with sqlite3.connect(path_to_db) as db:
         try:
@@ -1102,11 +1174,11 @@ def get_user_orders(user_id: int) -> list[dict[str, Any]]:
 def get_order_items(order_id: str) -> list[dict[str, Any]]:
     with sqlite3.connect(path_to_db) as db:
         rows = db.execute(
-            "SELECT title, price, quantity FROM storage_shop_order_items WHERE order_id = ?",
+            "SELECT title, price, quantity, product_id FROM storage_shop_order_items WHERE order_id = ?",
             (order_id,),
         ).fetchall()
 
-    return [{"title": row[0], "price": int(row[1]), "quantity": int(row[2])} for row in rows]
+    return [{"title": row[0], "price": int(row[1]), "quantity": int(row[2]), "product_id": int(row[3])} for row in rows]
 
 
 def get_order(order_id: str) -> dict[str, Any] | None:
@@ -1243,6 +1315,62 @@ def get_admin_products() -> list[dict[str, Any]]:
     return list_products(only_available=False)
 
 
+def export_catalog() -> dict[str, Any]:
+    """Экспортирует все категории и товары в словарь для сериализации в JSON."""
+    categories = list_categories()
+    result: list[dict[str, Any]] = []
+    for cat in categories:
+        products_page, total = list_products_paginated(
+            category_id=cat["id"], only_available=None, per_page=10000
+        )
+        result.append(
+            {
+                "name": cat["name"],
+                "products": [
+                    {
+                        "name": p["name"],
+                        "description": p["description"],
+                        "price": p["price"],
+                        "stock": p["stock"],
+                        "brand": p["brand"],
+                        "photo": p["photo"],
+                    }
+                    for p in products_page
+                ],
+            }
+        )
+    return {"version": 1, "categories": result}
+
+
+def import_catalog(data: dict[str, Any]) -> tuple[int, int]:
+    """Импортирует каталог из словаря.
+    Возвращает (кол-во категорий, кол-во товаров).
+    Существующие категории не дублируются; товары добавляются новые."""
+    cats_count = 0
+    prods_count = 0
+    for cat_data in data.get("categories", []):
+        cat_name = str(cat_data.get("name", "")).strip()
+        if not cat_name:
+            continue
+        cat_id = get_or_create_category(cat_name)
+        cats_count += 1
+        for prod in cat_data.get("products", []):
+            name = str(prod.get("name", "")).strip()
+            if not name:
+                continue
+            create_product(
+                name=name,
+                description=str(prod.get("description", "")),
+                price=int(prod.get("price", 0)),
+                stock=int(prod.get("stock", 0)),
+                category_id=cat_id,
+                photo=str(prod.get("photo", "")),
+                brand=str(prod.get("brand", "")),
+            )
+            prods_count += 1
+    return cats_count, prods_count
+
+
 def get_all_user_ids_for_broadcast() -> list[int]:
     result: set[int] = set()
     with sqlite3.connect(path_to_db) as db:
@@ -1281,3 +1409,74 @@ def get_shop_stats() -> dict[str, int]:
         "orders_archive": int(orders_archive),
         "revenue": int(revenue),
     }
+
+
+def get_shop_stats_full() -> dict[str, Any]:
+    """Расширенная статистика магазина по периодам."""
+    now = datetime.datetime.now()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
+    week_start = (now - datetime.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
+
+    with sqlite3.connect(path_to_db) as db:
+        # Товары
+        total_products = db.execute("SELECT COUNT(*) FROM storage_shop_products").fetchone()[0]
+        in_stock = db.execute("SELECT COUNT(*) FROM storage_shop_products WHERE stock > 0").fetchone()[0]
+        out_of_stock = db.execute("SELECT COUNT(*) FROM storage_shop_products WHERE stock <= 0").fetchone()[0]
+        total_units = db.execute("SELECT COALESCE(SUM(stock), 0) FROM storage_shop_products").fetchone()[0]
+        categories = db.execute("SELECT COUNT(*) FROM storage_shop_categories").fetchone()[0]
+
+        # Клиенты
+        customers = db.execute("SELECT COUNT(*) FROM storage_shop_users WHERE role='user'").fetchone()[0]
+
+        # Заказы за день
+        orders_day = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE created_at >= ?", (day_start,)).fetchone()[0]
+        revenue_day = db.execute("SELECT COALESCE(SUM(total_price),0) FROM storage_shop_orders WHERE created_at >= ?", (day_start,)).fetchone()[0]
+        sold_day = db.execute(
+            "SELECT COALESCE(SUM(i.quantity),0) FROM storage_shop_order_items i "
+            "JOIN storage_shop_orders o ON o.id = i.order_id WHERE o.created_at >= ?", (day_start,)
+        ).fetchone()[0]
+
+        # Заказы за неделю
+        orders_week = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE created_at >= ?", (week_start,)).fetchone()[0]
+        revenue_week = db.execute("SELECT COALESCE(SUM(total_price),0) FROM storage_shop_orders WHERE created_at >= ?", (week_start,)).fetchone()[0]
+        sold_week = db.execute(
+            "SELECT COALESCE(SUM(i.quantity),0) FROM storage_shop_order_items i "
+            "JOIN storage_shop_orders o ON o.id = i.order_id WHERE o.created_at >= ?", (week_start,)
+        ).fetchone()[0]
+
+        # Заказы за месяц
+        orders_month = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE created_at >= ?", (month_start,)).fetchone()[0]
+        revenue_month = db.execute("SELECT COALESCE(SUM(total_price),0) FROM storage_shop_orders WHERE created_at >= ?", (month_start,)).fetchone()[0]
+        sold_month = db.execute(
+            "SELECT COALESCE(SUM(i.quantity),0) FROM storage_shop_order_items i "
+            "JOIN storage_shop_orders o ON o.id = i.order_id WHERE o.created_at >= ?", (month_start,)
+        ).fetchone()[0]
+
+        # Всё время
+        orders_all = db.execute("SELECT COUNT(*) FROM storage_shop_orders").fetchone()[0]
+        revenue_all = db.execute("SELECT COALESCE(SUM(total_price),0) FROM storage_shop_orders").fetchone()[0]
+        sold_all = db.execute("SELECT COALESCE(SUM(quantity),0) FROM storage_shop_order_items").fetchone()[0]
+
+        orders_new = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status='Новый'").fetchone()[0]
+        orders_inwork = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status IN ('Оплачен', 'Отправлен')").fetchone()[0]
+        orders_done = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status='Доставлен'").fetchone()[0]
+        orders_cancel = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status='Отменен'").fetchone()[0]
+
+    return {
+        "total_products": int(total_products),
+        "in_stock": int(in_stock),
+        "out_of_stock": int(out_of_stock),
+        "total_units": int(total_units),
+        "categories": int(categories),
+        "customers": int(customers),
+        "orders_day": int(orders_day), "revenue_day": int(revenue_day), "sold_day": int(sold_day),
+        "orders_week": int(orders_week), "revenue_week": int(revenue_week), "sold_week": int(sold_week),
+        "orders_month": int(orders_month), "revenue_month": int(revenue_month), "sold_month": int(sold_month),
+        "orders_all": int(orders_all), "revenue_all": int(revenue_all), "sold_all": int(sold_all),
+        "orders_new": int(orders_new),
+        "orders_inwork": int(orders_inwork),
+        "orders_done": int(orders_done),
+        "orders_cancel": int(orders_cancel),
+    }
+

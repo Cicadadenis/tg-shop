@@ -220,7 +220,7 @@ def wishlist_kb(products: list[dict], *, page: int, total_pages: int) -> InlineK
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{product['name']} | {product['price']} грн | {product['stock']} шт",
+                text=f"{product['name']} | {product['price']} грн | {'В наличии' if product['stock'] > 0 else 'Нет в наличии'}",
                 callback_data=f"shop:product:{product['id']}",
             )
         ]
@@ -264,7 +264,10 @@ def admin_shop_kb(can_manage_admins: bool = False) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="➕ Выдать админа", callback_data="admin:admins:add")])
     rows.extend(
         [
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+            [InlineKeyboardButton(text="🚕 Способы доставки", callback_data="admin:delivery:settings")],            [
+                InlineKeyboardButton(text="📤 Экспорт каталога", callback_data="admin:catalog:export"),
+                InlineKeyboardButton(text="📥 Импорт каталога", callback_data="admin:catalog:import"),
+            ],            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
             [InlineKeyboardButton(text="⬅ Админ меню", callback_data="menu:admin")],
         ]
     )
@@ -299,12 +302,27 @@ def admin_product_actions_kb(product_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def checkout_delivery_kb() -> InlineKeyboardMarkup:
+def checkout_delivery_kb(
+    *,
+    nova: bool = True,
+    city: bool = True,
+    pickup: bool = True,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if nova:
+        rows.append([InlineKeyboardButton(text="🚚 Новая почта", callback_data="shop:delivery:nova")])
+    if city:
+        rows.append([InlineKeyboardButton(text="🚕 По городу", callback_data="shop:delivery:city")])
+    if pickup:
+        rows.append([InlineKeyboardButton(text="🏠 Самовывоз", callback_data="shop:delivery:pickup")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def checkout_city_payment_kb() -> InlineKeyboardMarkup:
+    """Для доставки 'По городу' — только оплата картой."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚚 Новая почта", callback_data="shop:delivery:nova")],
-            [InlineKeyboardButton(text="📦 Укрпочта", callback_data="shop:delivery:ukr")],
-            [InlineKeyboardButton(text="🏠 Самовывоз", callback_data="shop:delivery:pickup")],
+            [InlineKeyboardButton(text="💳 Банковская карта", callback_data="shop:pay:card")],
         ]
     )
 
@@ -315,6 +333,15 @@ def checkout_payment_kb(payment_methods: list[tuple[str, str]]) -> InlineKeyboar
         for code, label in payment_methods
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def checkout_bonus_kb(bonus: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"✅ Использовать бонус ({bonus} грн)", callback_data="shop:bonus:use")],
+            [InlineKeyboardButton(text="➡️ Продолжить без бонуса", callback_data="shop:bonus:skip")],
+        ]
+    )
 
 
 def profile_kb() -> InlineKeyboardMarkup:
@@ -406,19 +433,21 @@ def admin_order_status_kb(
     is_cod_payment = "налож" in (payment_label or "").strip().lower()
 
     rows: list[list[InlineKeyboardButton]] = []
-    if current_status_key != "paid" and not is_cod_payment:
-        rows.append([InlineKeyboardButton(text=status_buttons["paid"], callback_data=f"admin:order:status:{order_id}:paid")])
+    is_terminal_status = current_status_key in {"done", "cancel"}
+    if not is_terminal_status:
+        if current_status_key == "" and not is_cod_payment:
+            rows.append([InlineKeyboardButton(text=status_buttons["paid"], callback_data=f"admin:order:status:{order_id}:paid")])
 
-    shipping_row: list[InlineKeyboardButton] = []
-    if current_status_key != "shipped":
-        shipping_row.append(InlineKeyboardButton(text=status_buttons["shipped"], callback_data=f"admin:order:status:{order_id}:shipped"))
-    if current_status_key != "done":
-        shipping_row.append(InlineKeyboardButton(text=status_buttons["done"], callback_data=f"admin:order:status:{order_id}:done"))
-    if shipping_row:
-        rows.append(shipping_row)
+        shipping_row: list[InlineKeyboardButton] = []
+        if current_status_key != "shipped":
+            shipping_row.append(InlineKeyboardButton(text=status_buttons["shipped"], callback_data=f"admin:order:status:{order_id}:shipped"))
+        if current_status_key != "done":
+            shipping_row.append(InlineKeyboardButton(text=status_buttons["done"], callback_data=f"admin:order:status:{order_id}:done"))
+        if shipping_row:
+            rows.append(shipping_row)
 
-    if current_status_key != "cancel":
-        rows.append([InlineKeyboardButton(text=status_buttons["cancel"], callback_data=f"admin:order:status:{order_id}:cancel")])
+        if current_status_key != "cancel":
+            rows.append([InlineKeyboardButton(text=status_buttons["cancel"], callback_data=f"admin:order:status:{order_id}:cancel")])
 
     if receipt_pending:
         rows.append(
@@ -461,19 +490,52 @@ def admin_user_actions_kb(
     is_support: bool = False,
     back_target: str,
 ) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="✉️ Написать", callback_data=f"admin:user:msg:{user_id}")]]
+    rows = [
+        [InlineKeyboardButton(text="✉️ Написать", callback_data=f"admin:user:msg:{user_id}")],
+        [InlineKeyboardButton(text="🛒 Покупки", callback_data=f"admin:user:orders:{user_id}")],
+        [InlineKeyboardButton(text="🎁 Выдать Бонус", callback_data=f"admin:user:bonus:{user_id}")],
+    ]
     if can_manage_admins and is_admin and not is_owner:
         if is_support:
             rows.append([InlineKeyboardButton(text="🛟 Убрать из техподдержки", callback_data=f"admin:user:support:disable:{user_id}")])
         else:
             rows.append([InlineKeyboardButton(text="🛟 Назначить в техподдержку", callback_data=f"admin:user:support:enable:{user_id}")])
-    if can_manage_admins and not is_owner:
-        if is_admin:
-            rows.append([InlineKeyboardButton(text="➖ Убрать из админов", callback_data=f"admin:user:demote:{user_id}")])
-        else:
-            rows.append([InlineKeyboardButton(text="➕ Сделать админом", callback_data=f"admin:user:promote:{user_id}")])
+        rows.append([InlineKeyboardButton(text="➖ Убрать из админов", callback_data=f"admin:user:demote:{user_id}")])
     rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data=back_target)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def product_rating_kb(order_id: str, product_id: int) -> InlineKeyboardMarkup:
+    stars = ["0⭐", "1⭐", "2⭐", "3⭐", "4⭐", "5⭐"]
+    buttons = [
+        InlineKeyboardButton(text=s, callback_data=f"shop:rate:{order_id}:{product_id}:{i}")
+        for i, s in enumerate(stars)
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def product_survey_kb(order_id: str, product_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура опроса при доставке: 5 кнопок со звездами по одной в строке."""
+    rows = [
+        [InlineKeyboardButton(text="⭐" * i, callback_data=f"shop:rate:{order_id}:{product_id}:{i}")]
+        for i in range(5, 0, -1)
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_delivery_settings_kb(nova: bool, city: bool, pickup: bool) -> InlineKeyboardMarkup:
+    def _toggle_label(label: str, enabled: bool) -> str:
+        return f"{'✅' if enabled else '❌'} {label}"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=_toggle_label("Новая почта", nova), callback_data="admin:delivery:toggle:nova")],
+            [InlineKeyboardButton(text=_toggle_label("По городу", city), callback_data="admin:delivery:toggle:city")],
+            [InlineKeyboardButton(text=_toggle_label("Самовывоз", pickup), callback_data="admin:delivery:toggle:pickup")],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")],
+        ]
+    )
 
 
 def admin_categories_kb(categories: list[dict]) -> InlineKeyboardMarkup:

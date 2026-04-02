@@ -17,6 +17,7 @@ class AdminEditProduct(StatesGroup):
 
 
 class CheckoutForm(StatesGroup):
+    delivery_method = State()
     first_name = State()
     last_name = State()
     middle_name = State()
@@ -24,6 +25,11 @@ class CheckoutForm(StatesGroup):
     city = State()
     branch = State()
     payment = State()
+    bonus_confirm = State()
+    # City delivery flow
+    city_recip_name = State()
+    city_recip_address = State()
+    city_recip_phone = State()
 
 
 class OrderReceiptForm(StatesGroup):
@@ -61,10 +67,15 @@ class AdminNotifications(StatesGroup):
 class AdminUsers(StatesGroup):
     add_admin_id = State()
     message_text = State()
+    bonus_amount = State()
 
 
 class AdminCategory(StatesGroup):
     name = State()
+
+
+class AdminCatalogImport(StatesGroup):
+    file = State()
 
 
 class AdminPayments(StatesGroup):
