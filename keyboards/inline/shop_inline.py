@@ -5,6 +5,7 @@ def _role_label(role: str) -> str:
     return {
         "owner": "👑 главный",
         "admin": "🛡 админ",
+        "manager": "📋 менеджер",
         "user": "👤 клиент",
     }.get(role, role)
 
@@ -35,15 +36,16 @@ def categories_kb(categories: list[dict]) -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(text="🔎 Поиск", callback_data="shop:search"),
-            InlineKeyboardButton(text="❤️ Избранное", callback_data="menu:wishlist"),
+            InlineKeyboardButton(text="👁 Недавние", callback_data="menu:recent"),
         ]
     )
     rows.append(
         [
+            InlineKeyboardButton(text="❤️ Избранное", callback_data="menu:wishlist"),
             InlineKeyboardButton(text="🧺 Корзина", callback_data="menu:cart"),
-            InlineKeyboardButton(text="⬅ В меню", callback_data="menu:main"),
         ]
     )
+    rows.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -57,18 +59,6 @@ def catalog_kb(products: list[dict], *, page: int, total_pages: int) -> InlineKe
         ]
         for product in products
     ]
-    rows.append(
-        [
-            InlineKeyboardButton(text="💸 Цена", callback_data="shop:filter:price"),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(text="✅ В наличии", callback_data="shop:filter:stock"),
-            InlineKeyboardButton(text="♻ Сброс", callback_data="shop:filter:reset"),
-        ]
-    )
-
     nav: list[InlineKeyboardButton] = []
     if page > 1:
         nav.append(InlineKeyboardButton(text="⬅", callback_data="shop:page:prev"))
@@ -92,7 +82,7 @@ def catalog_kb(products: list[dict], *, page: int, total_pages: int) -> InlineKe
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def product_kb(product_id: int, *, in_wishlist: bool, show_cart_button: bool = False) -> InlineKeyboardMarkup:
+def product_kb(product_id: int, *, in_wishlist: bool, show_cart_button: bool = False, has_reviews: bool = False) -> InlineKeyboardMarkup:
     wishlist_text = "💔 Убрать из избранного" if in_wishlist else "❤️ В избранное"
     rows = [
         [
@@ -102,12 +92,14 @@ def product_kb(product_id: int, *, in_wishlist: bool, show_cart_button: bool = F
     ]
     if show_cart_button:
         rows.append([InlineKeyboardButton(text="🛒 Моя корзина", callback_data="menu:cart")])
+    if has_reviews:
+        rows.append([InlineKeyboardButton(text="💬 Отзывы", callback_data=f"shop:reviews:{product_id}")])
     rows.append([InlineKeyboardButton(text="⬅ Каталог", callback_data="menu:catalog")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def cart_kb(items: list[dict]) -> InlineKeyboardMarkup:
+def cart_kb(items: list[dict], *, has_promo: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for item in items:
         pid = item["position_id"]
@@ -121,6 +113,9 @@ def cart_kb(items: list[dict]) -> InlineKeyboardMarkup:
         )
 
     rows.append([InlineKeyboardButton(text="✅ Оформить заказ", callback_data="shop:checkout:start")])
+    rows.append([InlineKeyboardButton(text="🏷 Промокод", callback_data="shop:cart:promo")])
+    if has_promo:
+        rows.append([InlineKeyboardButton(text="✕ Убрать промокод", callback_data="shop:cart:promo:clear")])
     rows.append(
         [
             InlineKeyboardButton(text="🗑 Очистить", callback_data="shop:cart:clear"),
@@ -245,35 +240,96 @@ def wishlist_kb(products: list[dict], *, page: int, total_pages: int) -> InlineK
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_shop_kb(can_manage_admins: bool = False) -> InlineKeyboardMarkup:
+def admin_shop_kb(can_manage_admins: bool = False, *, full_access: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🛍 Каталог и заказы", callback_data="admin:section:catalog")],
+        [InlineKeyboardButton(text="💳 Платежи и доставка", callback_data="admin:section:payments")],
+        [InlineKeyboardButton(text="🛟 Обращения в поддержку", callback_data="admin:support_tickets")],
+    ]
+    if full_access:
+        rows.append([InlineKeyboardButton(text="📦 Экспорт и импорт", callback_data="admin:section:io")])
+        rows.append([InlineKeyboardButton(text="👨‍💼 Команда и промо", callback_data="admin:section:team")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_section_catalog_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:product:add"),
+                InlineKeyboardButton(text="📦 Товары", callback_data="admin:product:list"),
+            ],
+            [
+                InlineKeyboardButton(text="🧾 Заказы", callback_data="admin:orders"),
+                InlineKeyboardButton(text="🗂 Категории", callback_data="admin:categories"),
+            ],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")],
+        ]
+    )
+
+
+def admin_section_appearance_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="📝 Приветствие (/start)", callback_data="admin:welcome:edit")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="admin:main_menu:edit")],
+    ]
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_section_payments_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚙ Настройки оплаты", callback_data="admin:settings:payments")],
+            [InlineKeyboardButton(text="🚚 Способы доставки", callback_data="admin:delivery:settings")],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")],
+        ]
+    )
+
+
+def admin_section_insights_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📰 О боте", callback_data="admin:bot_info"),
+                InlineKeyboardButton(text="📊 Сводка", callback_data="admin:analytics"),
+            ],
+            [
+                InlineKeyboardButton(text="📈 Статистика", callback_data="admin:stats"),
+                InlineKeyboardButton(text="👥 Клиенты", callback_data="admin:users:list:insights"),
+            ],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
+        ]
+    )
+
+
+def admin_section_io_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📥 Экспорт заказов (CSV)", callback_data="admin:orders:export"),
+            ],
+            [
+                InlineKeyboardButton(text="📤 Экспорт каталога", callback_data="admin:catalog:export"),
+                InlineKeyboardButton(text="📥 Импорт каталога", callback_data="admin:catalog:import"),
+            ],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")],
+        ]
+    )
+
+
+def admin_section_team_kb(*, can_manage_admins: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:product:add"),
-            InlineKeyboardButton(text="📦 Товары", callback_data="admin:product:list"),
-        ],
-        [
-            InlineKeyboardButton(text="🧾 Заказы", callback_data="admin:orders"),
             InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast"),
-        ],
-        [
-            InlineKeyboardButton(text="🗂 Категории", callback_data="admin:categories"),
-            InlineKeyboardButton(text="👥 Клиенты", callback_data="admin:users:list"),
+            InlineKeyboardButton(text="🏷 Промокоды", callback_data="admin:promos"),
         ],
         [InlineKeyboardButton(text="🛡 Админы", callback_data="admin:admins:list")],
     ]
     if can_manage_admins:
         rows.append([InlineKeyboardButton(text="➕ Выдать права админа", callback_data="admin:admins:add")])
-    rows.extend(
-        [
-            [InlineKeyboardButton(text="🚚 Способы доставки", callback_data="admin:delivery:settings")],
-            [
-                InlineKeyboardButton(text="📤 Экспорт каталога", callback_data="admin:catalog:export"),
-                InlineKeyboardButton(text="📥 Импорт каталога", callback_data="admin:catalog:import"),
-            ],
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
-            [InlineKeyboardButton(text="⬅ Админ меню", callback_data="menu:admin")],
-        ]
-    )
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -287,7 +343,7 @@ def admin_products_kb(products: list[dict]) -> InlineKeyboardMarkup:
         ]
         for product in products
     ]
-    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -386,7 +442,7 @@ def admin_orders_menu_kb(*, has_new: bool, has_inwork: bool, has_archive: bool) 
     if has_archive:
         rows.append([InlineKeyboardButton(text="📁 Архив", callback_data="admin:orders:archive")])
     rows.append([InlineKeyboardButton(text="🧾 Поиск по чеку", callback_data="admin:orders:receipt:search")])
-    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -472,12 +528,14 @@ def admin_order_status_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_people_kb(users: list[dict], *, back_target: str = "admin:shop", add_admin_button: bool = False) -> InlineKeyboardMarkup:
+def admin_people_kb(users: list[dict], *, back_target: str = "admin:shop", add_admin_button: bool = False, source: str = "") -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
                 text=f"{user['name']} | {user['telegram_id']} | {_role_label(user['role'])}",
-                callback_data=f"admin:user:view:{user['telegram_id']}",
+                callback_data=(
+                    f"admin:user:view:{user['telegram_id']}:{source}" if source else f"admin:user:view:{user['telegram_id']}"
+                ),
             )
         ]
         for user in users
@@ -493,21 +551,27 @@ def admin_user_actions_kb(
     *,
     is_admin: bool,
     is_owner: bool,
+    is_manager: bool,
     can_manage_admins: bool,
     is_support: bool = False,
     back_target: str,
+    source: str = "",
 ) -> InlineKeyboardMarkup:
+    suffix = f":{source}" if source else ""
     rows = [
-        [InlineKeyboardButton(text="✉️ Написать", callback_data=f"admin:user:msg:{user_id}")],
-        [InlineKeyboardButton(text="🛒 Покупки", callback_data=f"admin:user:orders:{user_id}")],
-        [InlineKeyboardButton(text="🎁 Выдать Бонус", callback_data=f"admin:user:bonus:{user_id}")],
+        [InlineKeyboardButton(text="✉️ Написать", callback_data=f"admin:user:msg:{user_id}{suffix}")],
+        [InlineKeyboardButton(text="🛒 Покупки", callback_data=f"admin:user:orders:{user_id}{suffix}")],
+        [InlineKeyboardButton(text="🎁 Выдать Бонус", callback_data=f"admin:user:bonus:{user_id}{suffix}")],
     ]
-    if can_manage_admins and is_admin and not is_owner:
+    if can_manage_admins and not is_owner and (is_admin or is_manager):
         if is_support:
-            rows.append([InlineKeyboardButton(text="🛟 Убрать из техподдержки", callback_data=f"admin:user:support:disable:{user_id}")])
+            rows.append([InlineKeyboardButton(text="🛟 Убрать из техподдержки", callback_data=f"admin:user:support:disable:{user_id}{suffix}")])
         else:
-            rows.append([InlineKeyboardButton(text="🛟 Назначить в техподдержку", callback_data=f"admin:user:support:enable:{user_id}")])
-        rows.append([InlineKeyboardButton(text="➖ Убрать из админов", callback_data=f"admin:user:demote:{user_id}")])
+            rows.append([InlineKeyboardButton(text="🛟 Назначить в техподдержку", callback_data=f"admin:user:support:enable:{user_id}{suffix}")])
+        label = "➖ Убрать из админов" if is_admin else "➖ Снять менеджера"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"admin:user:demote:{user_id}{suffix}")])
+    elif can_manage_admins and not is_owner and not is_admin and not is_manager:
+        rows.append([InlineKeyboardButton(text="📋 Менеджер магазина", callback_data=f"admin:user:manager:{user_id}{suffix}")])
     rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data=back_target)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -541,7 +605,7 @@ def admin_delivery_settings_kb(nova: bool, city: bool, pickup: bool) -> InlineKe
             [InlineKeyboardButton(text=_toggle_label("Новая почта", nova), callback_data="admin:delivery:toggle:nova")],
             [InlineKeyboardButton(text=_toggle_label("По городу", city), callback_data="admin:delivery:toggle:city")],
             [InlineKeyboardButton(text=_toggle_label("Самовывоз", pickup), callback_data="admin:delivery:toggle:pickup")],
-            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:payments")],
         ]
     )
 
@@ -554,7 +618,7 @@ def admin_categories_kb(categories: list[dict]) -> InlineKeyboardMarkup:
         for category in categories
     ]
     rows.append([InlineKeyboardButton(text="➕ Создать категорию", callback_data="admin:category:add")])
-    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -564,7 +628,7 @@ def admin_product_category_kb(categories: list[dict]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=cat["name"], callback_data=f"admin:product:catsel:{cat['id']}")]
         for cat in categories
     ]
-    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

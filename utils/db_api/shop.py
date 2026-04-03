@@ -1,6 +1,9 @@
 import datetime
+import json
+import re
 import secrets
 import sqlite3
+from difflib import SequenceMatcher
 from typing import Any
 
 from utils.db_api.sqlite import path_to_db
@@ -159,20 +162,32 @@ def init_shop_tables() -> None:
 
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('maintenance', '0')")
         db.execute(
-            "INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('welcome_text', 'Добро пожаловать в магазин электроники')"
+            "INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('welcome_text', 'Задай Текст Приветствия в Настройках')"
+        )
+        db.execute(
+            "UPDATE storage_shop_settings SET value = 'Задай Текст Приветствия в Настройках' "
+            "WHERE key = 'welcome_text' AND value = 'Добро пожаловать в магазин электроники'"
         )
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('welcome_photo', '')")
         db.execute(
             """
             INSERT OR IGNORE INTO storage_shop_settings(key, value)
-            VALUES ('notif_admin_new_order_tpl', '<b>🆕 Новый заказ</b>\nНомер: <code>{order_id}</code>\nКлиент: <b>{name}</b>\nТелефон: <b>{phone}</b>\nСумма: <b>{total} грн</b>\nДоставка: <b>{delivery}</b>\nОплата: <b>{payment}</b>')
+            VALUES ('notif_admin_new_order_tpl', '<b>📦 Заказ {order_id}</b>\n📌 Статус: <b>Новый</b>\n👤 Клиент: <b>{name}</b>\n📞 Телефон: <b>{phone}</b>\n🚚 Доставка: <b>{delivery}</b>\n💳 Оплата: <b>{payment}</b>\n💰 Итого: <b>{total} грн</b>')
             """
+        )
+        db.execute(
+            "UPDATE storage_shop_settings SET value = '<b>📦 Заказ {order_id}</b>\\n📌 Статус: <b>Новый</b>\\n👤 Клиент: <b>{name}</b>\\n📞 Телефон: <b>{phone}</b>\\n🚚 Доставка: <b>{delivery}</b>\\n💳 Оплата: <b>{payment}</b>\\n💰 Итого: <b>{total} грн</b>' "
+            "WHERE key = 'notif_admin_new_order_tpl' AND value = '<b>🆕 Новый заказ</b>\\nНомер: <code>{order_id}</code>\\nКлиент: <b>{name}</b>\\nТелефон: <b>{phone}</b>\\nСумма: <b>{total} грн</b>\\nДоставка: <b>{delivery}</b>\\nОплата: <b>{payment}</b>'"
         )
         db.execute(
             """
             INSERT OR IGNORE INTO storage_shop_settings(key, value)
-            VALUES ('notif_user_status_tpl', '<b>🔔 Обновление заказа</b>\nНомер: <code>{order_id}</code>\nНовый статус: <b>{status}</b>')
+            VALUES ('notif_user_status_tpl', '<b>📦 Заказ {order_id}</b>\n📌 Статус: <b>{status}</b>')
             """
+        )
+        db.execute(
+            "UPDATE storage_shop_settings SET value = '<b>📦 Заказ {order_id}</b>\\n📌 Статус: <b>{status}</b>' "
+            "WHERE key = 'notif_user_status_tpl' AND value = '<b>🔔 Обновление заказа</b>\\nНомер: <code>{order_id}</code>\\nНовый статус: <b>{status}</b>'"
         )
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('notify_chat_id', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_card_info', '')")
@@ -220,6 +235,53 @@ def init_shop_tables() -> None:
             )
             """
         )
+        if not _column_exists(db, "storage_product_ratings", "comment"):
+            db.execute("ALTER TABLE storage_product_ratings ADD COLUMN comment TEXT NOT NULL DEFAULT ''")
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_shop_promocodes(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                kind TEXT NOT NULL,
+                value INTEGER NOT NULL,
+                max_uses INTEGER NOT NULL DEFAULT -1,
+                used_count INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                valid_until TEXT NOT NULL DEFAULT '',
+                target_user_id INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        if not _column_exists(db, "storage_shop_promocodes", "target_user_id"):
+            db.execute("ALTER TABLE storage_shop_promocodes ADD COLUMN target_user_id INTEGER NOT NULL DEFAULT 0")
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_shop_user_promo(
+                user_id INTEGER PRIMARY KEY,
+                code TEXT NOT NULL
+            )
+            """
+        )
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_shop_product_views(
+                user_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                viewed_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, product_id)
+            )
+            """
+        )
+
+        if not _column_exists(db, "storage_shop_orders", "promo_code"):
+            db.execute("ALTER TABLE storage_shop_orders ADD COLUMN promo_code TEXT NOT NULL DEFAULT ''")
+
+        db.execute(
+            "INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('notif_user_status_enabled', '1')"
+        )
 
         from data.config import adm, sozdatel
 
@@ -265,12 +327,66 @@ def set_shop_setting(key: str, value: str) -> None:
 
 
 def get_welcome_message() -> tuple[str, str]:
-    return get_shop_setting("welcome_text", "Добро пожаловать в магазин электроники"), get_shop_setting("welcome_photo", "")
+    return get_shop_setting("welcome_text", "Задай Текст Приветствия в Настройках"), get_shop_setting("welcome_photo", "")
 
 
 def set_welcome_message(text: str, photo: str = "") -> None:
     set_shop_setting("welcome_text", text)
     set_shop_setting("welcome_photo", photo)
+
+
+def get_main_menu_message() -> tuple[str, str]:
+    return get_shop_setting("main_menu_text", "<b>🏠 Главное меню</b>\n\n<i>Выберите раздел ниже</i>"), get_shop_setting("main_menu_photo", "")
+
+
+def set_main_menu_message(text: str, photo: str = "") -> None:
+    set_shop_setting("main_menu_text", text)
+    set_shop_setting("main_menu_photo", photo)
+
+
+def get_start_command_description() -> str:
+    from data.config import start_command_description as default_start_command_description
+
+    value = get_shop_setting("start_command_description", default_start_command_description).strip()
+    return value or default_start_command_description
+
+
+def set_start_command_description(text: str) -> None:
+    set_shop_setting("start_command_description", text)
+
+
+def get_text_menus() -> dict[str, dict]:
+    """Получить все текстовые меню"""
+    data = get_shop_setting("text_menus", "{}")
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def get_text_menu(menu_id: str) -> dict | None:
+    """Получить конкретное текстовое меню"""
+    menus = get_text_menus()
+    return menus.get(menu_id)
+
+
+def set_text_menu(menu_id: str, name: str, text: str, photo: str = "") -> None:
+    """Сохранить текстовое меню"""
+    menus = get_text_menus()
+    menus[menu_id] = {
+        "name": name,
+        "text": text,
+        "photo": photo,
+        "created_at": menus.get(menu_id, {}).get("created_at", _now()),
+    }
+    set_shop_setting("text_menus", json.dumps(menus, ensure_ascii=False))
+
+
+def delete_text_menu(menu_id: str) -> None:
+    """Удалить текстовое меню"""
+    menus = get_text_menus()
+    menus.pop(menu_id, None)
+    set_shop_setting("text_menus", json.dumps(menus, ensure_ascii=False))
 
 
 def get_delivery_settings() -> dict[str, bool]:
@@ -295,7 +411,7 @@ def toggle_maintenance() -> bool:
 def get_admin_new_order_template() -> str:
     return get_shop_setting(
         "notif_admin_new_order_tpl",
-        "<b>🆕 Новый заказ</b>\nНомер: <code>{order_id}</code>\nКлиент: <b>{name}</b>\nТелефон: <b>{phone}</b>\nСумма: <b>{total} грн</b>\nДоставка: <b>{delivery}</b>\nОплата: <b>{payment}</b>",
+        "<b>📦 Заказ {order_id}</b>\n📌 Статус: <b>Новый</b>\n👤 Клиент: <b>{name}</b>\n📞 Телефон: <b>{phone}</b>\n🚚 Доставка: <b>{delivery}</b>\n💳 Оплата: <b>{payment}</b>\n💰 Итого: <b>{total} грн</b>",
     )
 
 
@@ -306,7 +422,7 @@ def set_admin_new_order_template(template: str) -> None:
 def get_user_status_template() -> str:
     return get_shop_setting(
         "notif_user_status_tpl",
-        "<b>🔔 Обновление заказа</b>\nНомер: <code>{order_id}</code>\nНовый статус: <b>{status}</b>",
+        "<b>📦 Заказ {order_id}</b>\n📌 Статус: <b>{status}</b>",
     )
 
 
@@ -448,18 +564,50 @@ def set_user_bonus(user_id: int, amount: int) -> None:
         db.commit()
 
 
-def save_product_rating(order_id: str, user_id: int, product_id: int, rating: int) -> bool:
+def save_product_rating(order_id: str, user_id: int, product_id: int, rating: int, comment: str = "") -> bool:
     """Save rating. Returns True if saved, False if already rated."""
     try:
         with sqlite3.connect(path_to_db) as db:
             db.execute(
-                "INSERT OR IGNORE INTO storage_product_ratings(order_id, user_id, product_id, rating, created_at) VALUES (?, ?, ?, ?, ?)",
-                (order_id, user_id, product_id, rating, _now()),
+                """
+                INSERT OR IGNORE INTO storage_product_ratings(order_id, user_id, product_id, rating, created_at, comment)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (order_id, user_id, product_id, rating, _now(), (comment or "")[:2000]),
             )
+            ok = db.total_changes > 0
             db.commit()
-        return True
+            return ok
     except Exception:
         return False
+
+
+def update_product_rating_comment(order_id: str, product_id: int, comment: str) -> None:
+    text = (comment or "").strip()
+    if text == "—" or text == "-":
+        text = ""
+    text = text[:2000]
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            "UPDATE storage_product_ratings SET comment = ? WHERE order_id = ? AND product_id = ?",
+            (text, order_id, product_id),
+        )
+        db.commit()
+
+
+def list_product_review_snippets(product_id: int, *, limit: int = 4) -> list[dict[str, Any]]:
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            """
+            SELECT rating, comment, created_at
+            FROM storage_product_ratings
+            WHERE product_id = ? AND LENGTH(TRIM(comment)) > 0
+            ORDER BY datetime(created_at) DESC
+            LIMIT ?
+            """,
+            (product_id, limit),
+        ).fetchall()
+    return [{"rating": int(r[0]), "comment": (r[1] or "").strip(), "created_at": r[2] or ""} for r in rows]
 
 
 def get_product_rating(product_id: int) -> dict[str, Any]:
@@ -476,6 +624,12 @@ def get_product_rating(product_id: int) -> dict[str, Any]:
 
 def is_admin_user(telegram_id: int) -> bool:
     profile = get_user_profile(telegram_id)
+    return profile["role"] in {"owner", "admin", "manager"}
+
+
+def is_privileged_admin(telegram_id: int) -> bool:
+    """Полный доступ: владелец или админ (не менеджер)."""
+    profile = get_user_profile(telegram_id)
     return profile["role"] in {"owner", "admin"}
 
 
@@ -487,7 +641,11 @@ def is_owner_user(telegram_id: int) -> bool:
 def get_admin_ids() -> list[int]:
     with sqlite3.connect(path_to_db) as db:
         rows = db.execute(
-            "SELECT telegram_id FROM storage_shop_users WHERE role IN ('owner', 'admin') ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at ASC"
+            """
+            SELECT telegram_id FROM storage_shop_users
+            WHERE role IN ('owner', 'admin', 'manager')
+            ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, created_at ASC
+            """
         ).fetchall()
     return [int(row[0]) for row in rows if row and row[0]]
 
@@ -511,7 +669,7 @@ def is_support_admin(telegram_id: int) -> bool:
 def set_support_admin(telegram_id: int, enabled: bool) -> None:
     user_id = int(telegram_id)
     profile = get_user_profile(user_id)
-    if profile["role"] not in {"owner", "admin"}:
+    if profile["role"] not in {"owner", "admin", "manager"}:
         return
 
     ids = set(get_support_admin_ids())
@@ -627,7 +785,7 @@ def delete_old_closed_tickets(days: int = 7) -> int:
 
 
 def set_user_role(telegram_id: int, role: str, name: str = "") -> None:
-    if role not in {"owner", "admin", "user"}:
+    if role not in {"owner", "admin", "manager", "user"}:
         return
     ensure_user(telegram_id, name)
     with sqlite3.connect(path_to_db) as db:
@@ -652,8 +810,8 @@ def list_admin_users() -> list[dict[str, Any]]:
             """
             SELECT telegram_id, name, phone, address, created_at, role
             FROM storage_shop_users
-            WHERE role IN ('owner', 'admin')
-            ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at DESC
+            WHERE role IN ('owner', 'admin', 'manager')
+            ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, created_at DESC
             """
         ).fetchall()
     return [
@@ -815,6 +973,107 @@ def list_products(category_id: int | None = None, search: str | None = None, onl
     )[0]
 
 
+def _search_tokens(search: str | None) -> list[str]:
+    raw = (search or "").strip().lower()
+    if not raw:
+        return []
+    parts = re.findall(r"[\w\d\u0400-\u04FF]{2,}", raw)
+    if parts:
+        return parts[:12]
+    return [raw[:80]]
+
+
+def _fuzzy_token_word_score(token: str, word: str) -> float:
+    if len(word) < 2:
+        return 0.0
+    if token == word:
+        return 3.0
+    if len(token) >= 3 and (token in word or word in token):
+        return 2.2
+    r = SequenceMatcher(None, token, word).ratio()
+    return r * 2.5 if r >= 0.68 else 0.0
+
+
+def _fuzzy_product_score(
+    name: str,
+    description: str,
+    brand: str,
+    category_name: str,
+    tokens: list[str],
+) -> float:
+    hay = f"{name} {description} {brand} {category_name}".lower()
+    words = re.findall(r"[\w\d\u0400-\u04FF]+", hay)
+    total = 0.0
+    for t in tokens:
+        if t in hay:
+            total += 3.0
+            continue
+        best = 0.0
+        for w in words:
+            best = max(best, _fuzzy_token_word_score(t, w))
+        total += best
+    return total
+
+
+def _list_products_fuzzy_paginated(
+    *,
+    category_id: int | None,
+    only_available: bool | None,
+    min_price: int | None,
+    max_price: int | None,
+    brand: str | None,
+    tokens: list[str],
+    page: int,
+    per_page: int,
+) -> tuple[list[dict[str, Any]], int]:
+    sql, params = _build_products_where(
+        category_id=category_id,
+        search=None,
+        only_available=only_available,
+        min_price=min_price,
+        max_price=max_price,
+        brand=brand,
+    )
+    sql += " ORDER BY p.id DESC"
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(sql, params).fetchall()
+
+    scored: list[tuple[float, tuple[Any, ...]]] = []
+    for row in rows:
+        sc = _fuzzy_product_score(
+            str(row[1]),
+            str(row[2] or ""),
+            str(row[7] or ""),
+            str(row[8] or ""),
+            tokens,
+        )
+        if sc > 0:
+            scored.append((sc, row))
+
+    scored.sort(key=lambda x: (-x[0], -int(x[1][0])))
+    total = len(scored)
+    page = max(1, int(page))
+    per_page = max(1, int(per_page))
+    start = (page - 1) * per_page
+    chunk = scored[start : start + per_page]
+
+    items = [
+        {
+            "id": int(row[0]),
+            "name": row[1],
+            "description": row[2] or "",
+            "price": int(row[3]),
+            "stock": int(row[4]),
+            "category_id": int(row[5]),
+            "photo": row[6] or "",
+            "brand": row[7] or "",
+            "category_name": row[8] or "",
+        }
+        for _, row in chunk
+    ]
+    return items, total
+
+
 def _build_products_where(
     *,
     category_id: int | None = None,
@@ -835,9 +1094,21 @@ def _build_products_where(
         sql += " AND p.category_id = ?"
         params.append(category_id)
     if search:
-        sql += " AND (LOWER(p.name) LIKE ? OR LOWER(p.description) LIKE ? OR LOWER(COALESCE(p.brand, '')) LIKE ?)"
-        needle = f"%{search.lower()}%"
-        params.extend([needle, needle, needle])
+        tokens = _search_tokens(search)
+        if tokens:
+            or_parts: list[str] = []
+            for t in tokens:
+                needle = f"%{t}%"
+                or_parts.append(
+                    "(LOWER(p.name) LIKE ? OR LOWER(COALESCE(p.description, '')) LIKE ? OR "
+                    "LOWER(COALESCE(p.brand, '')) LIKE ? OR LOWER(COALESCE(c.name, '')) LIKE ?)"
+                )
+                params.extend([needle, needle, needle, needle])
+            sql += " AND (" + " OR ".join(or_parts) + ")"
+        else:
+            needle = f"%{search.strip().lower()}%"
+            sql += " AND (LOWER(p.name) LIKE ? OR LOWER(COALESCE(p.description, '')) LIKE ? OR LOWER(COALESCE(p.brand, '')) LIKE ? OR LOWER(COALESCE(c.name, '')) LIKE ?)"
+            params.extend([needle, needle, needle, needle])
     if only_available:
         sql += " AND p.stock > 0"
 
@@ -884,12 +1155,25 @@ def list_products_paginated(
     page = max(1, int(page))
     per_page = max(1, int(per_page))
     offset = (page - 1) * per_page
+    tokens = _search_tokens(search) if search else []
 
     sql += " ORDER BY p.id DESC LIMIT ? OFFSET ?"
 
     with sqlite3.connect(path_to_db) as db:
         total = int(db.execute(count_sql, params).fetchone()[0])
         rows = db.execute(sql, [*params, per_page, offset]).fetchall()
+
+    if search and tokens and total == 0:
+        return _list_products_fuzzy_paginated(
+            category_id=category_id,
+            only_available=only_available,
+            min_price=min_price,
+            max_price=max_price,
+            brand=brand,
+            tokens=tokens,
+            page=page,
+            per_page=per_page,
+        )
 
     items = [
         {
@@ -1094,12 +1378,335 @@ def cart_total(user_id: int) -> int:
     return sum(item["sum"] for item in get_cart(user_id))
 
 
-def create_order_from_cart(user_id: int, *, name: str, phone: str, address: str, delivery: str, payment: str, discount: int = 0) -> tuple[bool, str]:
+def record_product_view(user_id: int, product_id: int) -> None:
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            """
+            INSERT INTO storage_shop_product_views(user_id, product_id, viewed_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, product_id) DO UPDATE SET viewed_at = excluded.viewed_at
+            """,
+            (user_id, product_id, _now()),
+        )
+        db.commit()
+
+
+def list_recent_views(user_id: int, *, limit: int = 12) -> list[dict[str, Any]]:
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            """
+            SELECT v.product_id, p.name, p.price, p.stock
+            FROM storage_shop_product_views v
+            JOIN storage_shop_products p ON p.id = v.product_id
+            WHERE v.user_id = ?
+            ORDER BY datetime(v.viewed_at) DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        ).fetchall()
+    return [
+        {"id": int(r[0]), "name": r[1], "price": int(r[2]), "stock": int(r[3])}
+        for r in rows
+    ]
+
+
+def wishlist_user_ids_for_product(product_id: int) -> list[int]:
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            "SELECT user_id FROM storage_shop_wishlist WHERE product_id = ?",
+            (product_id,),
+        ).fetchall()
+    return [int(r[0]) for r in rows if r and r[0]]
+
+
+def set_user_applied_promo(user_id: int, code: str) -> None:
+    c = (code or "").strip().upper()
+    if not c:
+        clear_user_applied_promo(user_id)
+        return
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            "INSERT INTO storage_shop_user_promo(user_id, code) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET code = excluded.code",
+            (user_id, c),
+        )
+        db.commit()
+
+
+def get_user_applied_promo(user_id: int) -> str:
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            "SELECT code FROM storage_shop_user_promo WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    return str(row[0]).strip() if row and row[0] else ""
+
+
+def clear_user_applied_promo(user_id: int) -> None:
+    with sqlite3.connect(path_to_db) as db:
+        db.execute("DELETE FROM storage_shop_user_promo WHERE user_id = ?", (user_id,))
+        db.commit()
+
+
+def calc_promo_discount(code: str, subtotal: int, user_id: int | None = None) -> tuple[int, str]:
+    """Возвращает (скидка_грн, сообщение_ошибки). При успехе сообщение пустое."""
+    raw = (code or "").strip().upper()
+    if not raw:
+        return 0, ""
+    if subtotal < 1:
+        return 0, "Корзина пустая"
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            """
+            SELECT kind, value, max_uses, used_count, active, valid_until, target_user_id
+            FROM storage_shop_promocodes WHERE upper(code) = ?
+            """,
+            (raw,),
+        ).fetchone()
+    if not row:
+        return 0, "Промокод не найден"
+    kind, value, max_uses, used_count, active, valid_until, target_user_id = (
+        str(row[0] or "").lower(),
+        int(row[1]),
+        int(row[2]),
+        int(row[3]),
+        int(row[4]),
+        str(row[5] or "").strip(),
+        int(row[6]) if row[6] else 0,
+    )
+    if not active:
+        return 0, "Промокод неактивен"
+    if valid_until:
+        try:
+            if datetime.datetime.fromisoformat(valid_until) < datetime.datetime.now():
+                return 0, "Срок промокода истёк"
+        except ValueError:
+            pass
+    if max_uses >= 0 and used_count >= max_uses:
+        return 0, "Лимит активаций исчерпан"
+    if target_user_id > 0 and (user_id is None or int(user_id) != target_user_id):
+        return 0, "Промокод предназначен для другого пользователя"
+    value = max(0, value)
+    if kind == "percent":
+        off = (subtotal * value) // 100
+    elif kind == "fixed":
+        off = value
+    else:
+        return 0, "Некорректный тип скидки"
+    off = max(0, min(subtotal - 1, off))
+    return off, ""
+
+
+def promo_discount_for_user_cart(user_id: int) -> tuple[int, str, str]:
+    """Скидка по сохранённому промокоду пользователя. (amount, err, code)"""
+    code = get_user_applied_promo(user_id)
+    if not code:
+        return 0, "", ""
+    sub = cart_total(user_id)
+    off, err = calc_promo_discount(code, sub, user_id=user_id)
+    if err:
+        return 0, err, code
+    return off, "", code
+
+
+def create_promocode(
+    code: str,
+    kind: str,
+    value: int,
+    *,
+    max_uses: int = -1,
+    valid_until: str = "",
+    target_user_id: int = 0,
+) -> tuple[bool, str]:
+    raw = (code or "").strip().upper()
+    k = (kind or "").strip().lower()
+    if not raw or len(raw) > 40:
+        return False, "Некорректный код"
+    if k not in {"percent", "fixed"}:
+        return False, "Тип: percent или fixed"
+    if value < 0 or (k == "percent" and value > 90):
+        return False, "Некорректное значение"
+    if int(target_user_id) < 0:
+        return False, "Некорректный user_id"
+    try:
+        with sqlite3.connect(path_to_db) as db:
+            db.execute(
+                """
+                INSERT INTO storage_shop_promocodes(code, kind, value, max_uses, used_count, active, valid_until, target_user_id)
+                VALUES (?, ?, ?, ?, 0, 1, ?, ?)
+                """,
+                (raw, k, int(value), int(max_uses), valid_until or "", int(target_user_id)),
+            )
+            db.commit()
+        return True, f"Промокод {raw} создан"
+    except Exception:
+        return False, "Такой код уже есть"
+
+
+def list_promocodes() -> list[dict[str, Any]]:
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            """
+            SELECT id, code, kind, value, max_uses, used_count, active, valid_until, target_user_id
+            FROM storage_shop_promocodes ORDER BY id DESC
+            """
+        ).fetchall()
+    return [
+        {
+            "id": int(r[0]),
+            "code": r[1],
+            "kind": r[2],
+            "value": int(r[3]),
+            "max_uses": int(r[4]),
+            "used_count": int(r[5]),
+            "active": bool(r[6]),
+            "valid_until": r[7] or "",
+            "target_user_id": int(r[8]) if r[8] else 0,
+        }
+        for r in rows
+    ]
+
+
+def delete_promocode(code: str) -> bool:
+    raw = (code or "").strip().upper()
+    if not raw:
+        return False
+    with sqlite3.connect(path_to_db) as db:
+        cur = db.execute("DELETE FROM storage_shop_promocodes WHERE upper(code) = ?", (raw,))
+        db.commit()
+        return cur.rowcount > 0
+
+
+def toggle_promocode(code: str) -> bool:
+    raw = (code or "").strip().upper()
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            "SELECT active FROM storage_shop_promocodes WHERE upper(code) = ?", (raw,)
+        ).fetchone()
+        if not row:
+            return False
+        new_v = 0 if int(row[0]) else 1
+        db.execute(
+            "UPDATE storage_shop_promocodes SET active = ? WHERE upper(code) = ?",
+            (new_v, raw),
+        )
+        db.commit()
+        return True
+
+
+def delete_promocode_id(row_id: int) -> bool:
+    if row_id < 1:
+        return False
+    with sqlite3.connect(path_to_db) as db:
+        cur = db.execute("DELETE FROM storage_shop_promocodes WHERE id = ?", (row_id,))
+        db.commit()
+        return cur.rowcount > 0
+
+
+def toggle_promocode_id(row_id: int) -> bool:
+    if row_id < 1:
+        return False
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute("SELECT active FROM storage_shop_promocodes WHERE id = ?", (row_id,)).fetchone()
+        if not row:
+            return False
+        new_v = 0 if int(row[0]) else 1
+        db.execute("UPDATE storage_shop_promocodes SET active = ? WHERE id = ?", (new_v, row_id))
+        db.commit()
+        return True
+
+
+def is_user_status_notification_enabled() -> bool:
+    return get_shop_setting("notif_user_status_enabled", "1") == "1"
+
+
+def set_user_status_notification_enabled(enabled: bool) -> None:
+    set_shop_setting("notif_user_status_enabled", "1" if enabled else "0")
+
+
+def export_orders_csv(limit: int = 2000) -> str:
+    """UTF-8 CSV для Excel (разделитель ;)."""
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            """
+            SELECT id, user_id, total_price, status, delivery, payment, customer_name,
+                   customer_phone, customer_address, created_at, promo_code
+            FROM storage_shop_orders
+            ORDER BY datetime(created_at) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    lines = ["order_id;user_id;total;status;delivery;payment;name;phone;address;created_at;promo_code"]
+    for r in rows:
+        def esc(x: Any) -> str:
+            s = str(x if x is not None else "").replace('"', '""')
+            if ";" in s or "\n" in s:
+                return f'"{s}"'
+            return s
+
+        lines.append(
+            ";".join(esc(v) for v in r),
+        )
+    return "\n".join(lines)
+
+
+def get_analytics_extended() -> dict[str, Any]:
+    now = datetime.datetime.now()
+    week_start = (now - datetime.timedelta(days=7)).replace(microsecond=0).isoformat(sep=" ")
+    with sqlite3.connect(path_to_db) as db:
+        top_sales = db.execute(
+            """
+            SELECT i.title, SUM(i.quantity) AS q, SUM(i.quantity * i.price) AS rev
+            FROM storage_shop_order_items i
+            JOIN storage_shop_orders o ON o.id = i.order_id
+            WHERE datetime(o.created_at) >= datetime(?)
+            GROUP BY i.product_id, i.title
+            ORDER BY q DESC
+            LIMIT 8
+            """,
+            (week_start,),
+        ).fetchall()
+        top_views = db.execute(
+            """
+            SELECT p.name, COUNT(*) AS c
+            FROM storage_shop_product_views v
+            JOIN storage_shop_products p ON p.id = v.product_id
+            GROUP BY v.product_id, p.name
+            ORDER BY c DESC
+            LIMIT 8
+            """,
+        ).fetchall()
+        promo_used = db.execute(
+            "SELECT COUNT(*) FROM storage_shop_orders WHERE trim(promo_code) != ''"
+        ).fetchone()[0]
+    return {
+        "top_sales": [(str(t[0]), int(t[1]), int(t[2])) for t in top_sales],
+        "top_views": [(str(t[0]), int(t[1])) for t in top_views],
+        "orders_with_promo": int(promo_used or 0),
+    }
+
+
+def create_order_from_cart(
+    user_id: int,
+    *,
+    name: str,
+    phone: str,
+    address: str,
+    delivery: str,
+    payment: str,
+    discount: int = 0,
+    promo_discount: int = 0,
+    promo_code: str = "",
+) -> tuple[bool, str]:
     cart = get_cart(user_id)
     if not cart:
         return False, "Корзина пустая"
 
-    total = max(1, sum(item["sum"] for item in cart) - int(discount))
+    subtotal = sum(item["sum"] for item in cart)
+    promo_off = max(0, int(promo_discount))
+    after_promo = max(1, subtotal - promo_off)
+    bonus_off = max(0, int(discount))
+    total = max(1, after_promo - bonus_off)
+    promo_tag = (promo_code or "").strip().upper()[:64]
 
     with sqlite3.connect(path_to_db) as db:
         try:
@@ -1120,10 +1727,10 @@ def create_order_from_cart(user_id: int, *, name: str, phone: str, address: str,
                 """
                 INSERT INTO storage_shop_orders(
                     id, user_id, total_price, status, delivery, payment,
-                    customer_name, customer_phone, customer_address, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    customer_name, customer_phone, customer_address, created_at, promo_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (order_id, user_id, total, "Новый", delivery, payment, name, phone, address, _now()),
+                (order_id, user_id, total, "Новый", delivery, payment, name, phone, address, _now(), promo_tag),
             )
 
             for item in cart:
@@ -1136,12 +1743,18 @@ def create_order_from_cart(user_id: int, *, name: str, phone: str, address: str,
                 )
 
             db.execute("DELETE FROM storage_shop_cart WHERE user_id = ?", (user_id,))
+            if promo_tag and promo_off > 0:
+                db.execute(
+                    "UPDATE storage_shop_promocodes SET used_count = used_count + 1 WHERE upper(code) = ? AND (target_user_id = 0 OR target_user_id = ?)",
+                    (promo_tag, int(user_id)),
+                )
             db.commit()
         except Exception:
             db.rollback()
             return False, "Не удалось оформить заказ"
 
     update_user_contacts(user_id, name=name, phone=phone, address=address)
+    clear_user_applied_promo(user_id)
     return True, order_id
 
 
@@ -1188,7 +1801,7 @@ def get_order(order_id: str) -> dict[str, Any] | None:
             SELECT id, user_id, total_price, status, delivery, payment,
                    customer_name, customer_phone, customer_address, created_at,
                      receipt_file_id, receipt_file_type, receipt_sent_at,
-                     receipt_review_status, receipt_reviewed_at
+                     receipt_review_status, receipt_reviewed_at, promo_code
             FROM storage_shop_orders WHERE id = ?
             """,
             (order_id,),
@@ -1213,6 +1826,7 @@ def get_order(order_id: str) -> dict[str, Any] | None:
         "receipt_sent_at": row[12] or "",
         "receipt_review_status": row[13] or "",
         "receipt_reviewed_at": row[14] or "",
+        "promo_code": row[15] or "",
         "receipt_sent": bool((row[10] or "").strip()),
     }
 

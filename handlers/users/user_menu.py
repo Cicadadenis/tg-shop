@@ -12,6 +12,9 @@ from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, Inli
 from data.config import adm, bot_description
 from keyboards.inline.user_inline import (
     admin_settings_inline_kb,
+    admin_settings_notifications_inline_kb,
+    admin_settings_payments_inline_kb,
+    admin_settings_service_inline_kb,
     admin_menu_inline_kb,
     admin_reply_cancel_kb,
     main_menu_inline_kb,
@@ -22,6 +25,7 @@ from keyboards.inline.user_inline import (
     support_ticket_view_kb,
 )
 from handlers.users.shop_state import AdminNotifications, AdminPayments, SupportDialog
+from utils.set_bot_commands import set_default_commands
 from utils.db_api.shop import get_user_profile as get_shop_user_profile
 from utils.db_api.shop import ensure_user
 from utils.db_api.shop import (
@@ -31,13 +35,18 @@ from utils.db_api.shop import (
     get_payment_info,
     get_support_admin_ids,
     get_shop_stats,
+    get_start_command_description,
     get_user_status_template,
     get_welcome_message,
+    get_main_menu_message,
     is_admin_user,
     is_payment_enabled,
     is_maintenance,
     is_owner_user,
+    is_privileged_admin,
     is_support_admin,
+    is_user_status_notification_enabled,
+    set_user_status_notification_enabled,
     create_support_ticket,
     get_support_tickets,
     get_support_ticket,
@@ -47,6 +56,7 @@ from utils.db_api.shop import (
     set_notify_chat_id,
     set_payment_enabled,
     set_payment_setting,
+    set_start_command_description,
     set_user_status_template,
 )
 from utils.db_api.sqlite import get_all_categoriesx, get_userx
@@ -61,36 +71,94 @@ def _is_admin(user_id: int) -> bool:
     return is_admin_user(user_id)
 
 
-def _get_admin_menu_kb():
-    return admin_menu_inline_kb(maintenance_enabled=is_maintenance())
+def _get_admin_menu_kb(viewer_id: int) -> InlineKeyboardMarkup:
+    return admin_menu_inline_kb(
+        maintenance_enabled=is_maintenance(),
+        full_access=is_privileged_admin(viewer_id),
+    )
 
 
-def _get_admin_settings_kb():
+def _get_admin_settings_kb() -> InlineKeyboardMarkup:
     return admin_settings_inline_kb(
         cod_enabled=is_payment_enabled("cod"),
         card_enabled=bool(get_payment_info("card")),
         applepay_enabled=bool(get_payment_info("applepay")),
-        googlepay_enabled=bool(get_payment_info("googlepay"))
+        googlepay_enabled=bool(get_payment_info("googlepay")),
+        client_status_notif=is_user_status_notification_enabled(),
     )
+
+
+def _get_admin_settings_notif_kb() -> InlineKeyboardMarkup:
+    return admin_settings_notifications_inline_kb(
+        client_status_notif=is_user_status_notification_enabled(),
+    )
+
+
+def _get_admin_settings_payments_kb() -> InlineKeyboardMarkup:
+    return admin_settings_payments_inline_kb(
+        cod_enabled=is_payment_enabled("cod"),
+        card_enabled=bool(get_payment_info("card")),
+        applepay_enabled=bool(get_payment_info("applepay")),
+        googlepay_enabled=bool(get_payment_info("googlepay")),
+    )
+
+
+def _get_admin_settings_service_kb() -> InlineKeyboardMarkup:
+    return admin_settings_service_inline_kb()
 
 
 def _admin_settings_text() -> str:
     chat_id = get_notify_chat_id() or "не задан"
+    st = "✅ включены" if is_user_status_notification_enabled() else "❌ выключены"
+    start_cmd = get_start_command_description()
+    return (
+        "⚙️ <b>Настройки</b>\n"
+        "──────────────\n"
+        "<i>Оформление, уведомления и сервисные инструменты</i>\n\n"
+        "<b>Текущие параметры</b>\n"
+        f"📬 Авто-уведомления: <b>{st}</b>\n"
+        f"⌨️ Команда /start: <b>{start_cmd}</b>\n"
+        f"📢 Лог-чат заказов: <code>{chat_id}</code>\n\n"
+        "<b>Разделы ниже</b>\n"
+        "🎨 Оформление магазина\n"
+        "🔔 Шаблоны и уведомления\n"
+        "🗂 Сервис\n\n"
+        "<b>Плейсхолдеры шаблонов</b>\n"
+        "<code>{order_id}</code> <code>{status}</code> <code>{name}</code>\n"
+        "<code>{phone}</code> <code>{total}</code> <code>{delivery}</code> <code>{payment}</code>"
+    )
+
+
+def _admin_settings_notifications_text() -> str:
+    chat_id = get_notify_chat_id() or "не задан"
+    st = "✅ включены" if is_user_status_notification_enabled() else "❌ выключены"
+    start_cmd = get_start_command_description()
+    return (
+        "🔔 <b>Шаблоны и уведомления</b>\n"
+        "──────────────\n"
+        "<i>Уведомления клиентам и служебные шаблоны</i>\n\n"
+        f"📬 Авто-уведомления: <b>{st}</b>\n"
+        f"📢 Лог-чат заказов: <code>{chat_id}</code>\n"
+        f"⌨️ Команда /start: <b>{start_cmd}</b>\n\n"
+        "📝 <b>Плейсхолдеры шаблонов</b>\n"
+        "<code>{order_id}</code> <code>{status}</code> <code>{name}</code>\n"
+        "<code>{phone}</code> <code>{total}</code> <code>{delivery}</code> <code>{payment}</code>"
+    )
+
+
+def _admin_settings_payments_text() -> str:
     cod = "✅ включен" if is_payment_enabled("cod") else "❌ выключен"
     card = "✅ настроена" if get_payment_info("card") else "➖ не настроена"
     apple = "✅ настроен" if get_payment_info("applepay") else "➖ не настроен"
     google = "✅ настроен" if get_payment_info("googlepay") else "➖ не настроен"
     return (
-        "⚙️ <b>Настройки уведомлений и оплаты</b>\n\n"
-        f"📢 Лог-чат заказов: <code>{chat_id}</code>\n\n"
-        "💳 <b>Способы оплаты:</b>\n"
-        f"  🚚 Наложенный платёж: <b>{cod}</b>\n"
-        f"  💳 Карта: <b>{card}</b>\n"
-        f"  🍏 Apple Pay: <b>{apple}</b>\n"
-        f"  🤖 Google Pay: <b>{google}</b>\n\n"
-        "📝 <b>Плейсхолдеры шаблонов:</b>\n"
-        "<code>{order_id}</code> <code>{status}</code> <code>{name}</code>\n"
-        "<code>{phone}</code> <code>{total}</code> <code>{delivery}</code> <code>{payment}</code>"
+        "💳 <b>Настройки оплаты</b>\n"
+        "──────────────\n"
+        "<i>Реквизиты и доступные способы оплаты</i>\n\n"
+        f"🚚 Наложенный платёж: <b>{cod}</b>\n"
+        f"💳 Карта: <b>{card}</b>\n"
+        f"🍏 Apple Pay: <b>{apple}</b>\n"
+        f"🤖 Google Pay: <b>{google}</b>"
     )
 
 
@@ -110,10 +178,24 @@ async def _safe_edit(message: Message, text: str, reply_markup=None, disable_web
         raise
 
 
+async def _clear_recent_private_chat(message: Message, limit: int = 40) -> None:
+    if getattr(message.chat, "type", "") != "private":
+        return
+
+    start_id = max(1, message.message_id - limit)
+    for message_id in range(message.message_id, start_id - 1, -1):
+        try:
+            await message.bot.delete_message(message.chat.id, message_id)
+        except Exception:
+            continue
+
+
 @router.message(CommandStart())
 @router.message(F.text == "⬅ На главную")
 async def open_main_menu(message: Message, state: FSMContext) -> None:
     await state.clear()
+    if (message.text or "").startswith("/start"):
+        await _clear_recent_private_chat(message)
     welcome_text, welcome_photo = get_welcome_message()
     if is_maintenance() and not _is_admin(message.from_user.id):
         welcome_text = f"{welcome_text}\n\n<b>🛠 Магазин временно на техработах</b>"
@@ -134,11 +216,23 @@ async def open_main_menu(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "menu:main")
 async def callback_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await _safe_edit(
-        callback.message,
-        "🏠 <b>Главное меню</b>",
-        reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
-    )
+    main_menu_text, main_menu_photo = get_main_menu_message()
+    
+    if main_menu_photo:
+        await callback.message.delete()
+        await callback.bot.send_photo(
+            chat_id=callback.from_user.id,
+            photo=main_menu_photo,
+            caption=main_menu_text,
+            reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
+            parse_mode="HTML",
+        )
+    else:
+        await _safe_edit(
+            callback.message,
+            main_menu_text,
+            reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
+        )
     await callback.answer()
 
 
@@ -146,7 +240,9 @@ async def callback_main_menu(callback: CallbackQuery, state: FSMContext) -> None
 async def callback_accounts(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback.message,
-        "🛍️ <b>Каталог</b>\n\nОткройте раздел Каталог для просмотра товаров.",
+        "<b>🛍 Каталог</b>\n"
+        "──────────────\n"
+        "<i>Откройте раздел каталога, чтобы посмотреть товары и категории.</i>",
         reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
     )
     await callback.answer()
@@ -165,8 +261,10 @@ async def callback_category_selected(callback: CallbackQuery) -> None:
 
     await _safe_edit(
         callback.message,
-        f"📂 <b>Категория:</b> {category_name}\n\n"
-        "Детальная выдача перенесена в новый flow и будет добавлена отдельным модулем.",
+        f"<b>📂 Категория</b>\n"
+        "──────────────\n"
+        f"<b>{category_name}</b>\n\n"
+        "<i>Детальная выдача по этой категории будет подключена в следующем обновлении.</i>",
         reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
     )
     await callback.answer()
@@ -189,8 +287,9 @@ async def callback_profile(callback: CallbackQuery) -> None:
     bonus_line = f"🎁 Бонус: <b>{bonus} грн</b>\n" if bonus > 0 else ""
     profile_text = (
         "<b>👤 Личный кабинет</b>\n"
+        "──────────────\n"
         f"🆔 ID: <code>{callback.from_user.id}</code>\n"
-        f"🔖 Username: <b>{username}</b>\n"
+        f"🔖 Имя в Telegram: <b>{username}</b>\n"
         f"🙍 ФИО: <b>{full_name}</b>\n"
         f"📞 Телефон: <b>{phone}</b>\n"
         f"📍 Адрес: <b>{address}</b>\n"
@@ -232,11 +331,23 @@ async def callback_profile_purchases(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "profile:back")
 async def callback_profile_back(callback: CallbackQuery) -> None:
-    await _safe_edit(
-        callback.message,
-        "🏠 <b>Главное меню</b>",
-        reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
-    )
+    main_menu_text, main_menu_photo = get_main_menu_message()
+    
+    if main_menu_photo:
+        await callback.message.delete()
+        await callback.bot.send_photo(
+            chat_id=callback.from_user.id,
+            photo=main_menu_photo,
+            caption=main_menu_text,
+            reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
+            parse_mode="HTML",
+        )
+    else:
+        await _safe_edit(
+            callback.message,
+            main_menu_text,
+            reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
+        )
     await callback.answer()
 
 
@@ -245,8 +356,9 @@ async def callback_support_menu(callback: CallbackQuery, state: FSMContext) -> N
     await state.clear()
     await _safe_edit(
         callback.message,
-        "🛟 <b>Техническая поддержка</b>\n\n"
-        "Если у вас есть вопрос по заказу или работе бота — напишите нам, и мы ответим в ближайшее время. 🕐",
+        "<b>🛟 Поддержка</b>\n"
+        "──────────────\n"
+        "<i>Вопрос по заказу, оплате или работе бота? Напишите нам, и мы ответим в ближайшее время.</i>",
         reply_markup=support_menu_inline_kb,
     )
     await callback.answer()
@@ -257,8 +369,9 @@ async def callback_support_start(callback: CallbackQuery, state: FSMContext) -> 
     await state.set_state(SupportDialog.user_message)
     await _safe_edit(
         callback.message,
-        "✍️ <b>Опишите суть вашего вопроса:</b>\n\n"
-        "Можно прикрепить фото или файл 📎",
+        "<b>✍ Обращение</b>\n"
+        "──────────────\n"
+        "<i>Опишите вопрос сообщением. При необходимости можно приложить <b>фото</b> или <b>файл</b>.</i>",
         reply_markup=support_back_inline_kb,
     )
     await callback.answer()
@@ -271,7 +384,11 @@ async def support_user_message_send(message: Message, state: FSMContext) -> None
     has_document = bool(message.document)
 
     if not text_body and not has_photo and not has_document:
-        await message.answer("⚠️ Пожалуйста, отправьте текст, фото или файл")
+        await message.answer(
+            "<b>⚠ Нужно содержимое</b>\n\n"
+            "<i>Отправьте текст, фото или документ.</i>",
+            reply_markup=support_back_inline_kb,
+        )
         return
 
     user_id = message.from_user.id
@@ -332,16 +449,18 @@ async def support_user_message_send(message: Message, state: FSMContext) -> None
     await state.clear()
     if delivered == 0:
         await message.answer(
-            "✅ <b>Обращение принято!</b>\n\n"
-            "Сейчас ни один специалист не доступен, но мы обязательно свяжемся с вами. 🕐\n\n"
-            "<i>— Служба поддержки</i>",
+            "<b>✅ Обращение принято</b>\n"
+            "──────────────\n"
+            "Сейчас специалисты недоступны, но мы свяжемся с вами. 🕐\n\n"
+            "<i>Служба поддержки</i>",
             reply_markup=support_menu_inline_kb,
         )
         return
     await message.answer(
-        "✅ <b>Обращение принято!</b>\n\n"
-        "Наш специалист ответит вам в ближайшее время. 🕐\n\n"
-        "<i>— Служба поддержки</i>",
+        "<b>✅ Обращение принято</b>\n"
+        "──────────────\n"
+        "Специалист ответит в ближайшее время. 🕐\n\n"
+        "<i>Служба поддержки</i>",
         reply_markup=support_menu_inline_kb,
     )
 
@@ -381,7 +500,10 @@ async def support_admin_reply_send(message: Message, state: FSMContext) -> None:
         return
     if not (is_owner_user(message.from_user.id) or is_support_admin(message.from_user.id)):
         await state.clear()
-        await message.answer("🚫 Вы не назначены в службу поддержки")
+        await message.answer(
+            "<b>🚫 Нет доступа</b>\n\n<i>Вы не в составе службы поддержки.</i>",
+            reply_markup=admin_reply_cancel_kb,
+        )
         return
 
     text_body = (message.text or message.caption or "").strip()
@@ -389,7 +511,10 @@ async def support_admin_reply_send(message: Message, state: FSMContext) -> None:
     has_document = bool(message.document)
 
     if not text_body and not has_photo and not has_document:
-        await message.answer("⚠️ Введите текст, прикрепите фото или файл для ответа")
+        await message.answer(
+            "<b>⚠ Пустой ответ</b>\n\n<i>Введите текст или приложите фото / файл.</i>",
+            reply_markup=admin_reply_cancel_kb,
+        )
         return
 
     data = await state.get_data()
@@ -397,7 +522,10 @@ async def support_admin_reply_send(message: Message, state: FSMContext) -> None:
     ticket_id_done = int(data.get("support_ticket_id", 0) or 0)
     if not target_user_id:
         await state.clear()
-        await message.answer("❌ Не удалось определить клиента")
+        await message.answer(
+            "<b>❌ Ошибка</b>\n\n<i>Не удалось определить клиента. Начните ответ из списка обращений.</i>",
+            reply_markup=admin_reply_cancel_kb,
+        )
         return
 
     reply_header = "🛟 <b>Ответ службы поддержки</b>\n\n"
@@ -426,20 +554,31 @@ async def support_admin_reply_send(message: Message, state: FSMContext) -> None:
     except Exception:
         await state.clear()
         await message.answer(
-            "❌ Не удалось отправить ответ клиенту",
+            "<b>❌ Не отправлено</b>\n\n"
+            "<i>Клиент не получил сообщение (не писал боту или заблокировал).</i>",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="📋 К обращениям", callback_data="admin:support_tickets")]]
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 К обращениям", callback_data="admin:support_tickets")],
+                    [InlineKeyboardButton(text="⬅ Управление магазином", callback_data="admin:shop")],
+                ]
             ),
         )
         return
 
     await state.clear()
     await message.answer(
-        "✅ <b>Ответ успешно отправлен клиенту!</b>",
+        "<b>✅ Ответ доставлен клиенту</b>",
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[
-                InlineKeyboardButton(text="📋 К обращению", callback_data=f"admin:ticket:{ticket_id_done}" if ticket_id_done else "admin:support_tickets"),
-            ]]
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📋 К обращению",
+                        callback_data=f"admin:ticket:{ticket_id_done}" if ticket_id_done else "admin:support_tickets",
+                    )
+                ],
+                [InlineKeyboardButton(text="⬅ Все обращения", callback_data="admin:support_tickets")],
+                [InlineKeyboardButton(text="⬅ Управление магазином", callback_data="admin:shop")],
+            ]
         ),
     )
 
@@ -554,9 +693,27 @@ async def callback_admin_ticket_view(callback: CallbackQuery) -> None:
     if media_file_id and media_type in {"photo", "document"}:
         try:
             if media_type == "photo":
-                await callback.message.answer_photo(media_file_id, caption=f"🧾 Вложение к обращению #{ticket_id}")
+                ticket_back = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="⬅ К обращению", callback_data=f"admin:ticket:{ticket_id}")],
+                    ]
+                )
+                await callback.message.answer_photo(
+                    media_file_id,
+                    caption=f"<b>🧾 Вложение</b> к обращению <code>#{ticket_id}</code>",
+                    reply_markup=ticket_back,
+                )
             else:
-                await callback.message.answer_document(media_file_id, caption=f"🧾 Вложение к обращению #{ticket_id}")
+                ticket_back = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="⬅ К обращению", callback_data=f"admin:ticket:{ticket_id}")],
+                    ]
+                )
+                await callback.message.answer_document(
+                    media_file_id,
+                    caption=f"<b>🧾 Вложение</b> к обращению <code>#{ticket_id}</code>",
+                    reply_markup=ticket_back,
+                )
         except Exception:
             pass
 
@@ -570,7 +727,11 @@ async def callback_admin_menu(callback: CallbackQuery) -> None:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
-    await _safe_edit(callback.message, "🔧 <b>Панель администратора</b>", reply_markup=_get_admin_menu_kb())
+    await _safe_edit(
+        callback.message,
+        "🔧 <b>Панель администратора</b>\n──────────────\n<i>Выберите нужный раздел управления</i>",
+        reply_markup=_get_admin_menu_kb(callback.from_user.id),
+    )
     await callback.answer()
 
 
@@ -582,17 +743,18 @@ async def callback_admin_bot_info(callback: CallbackQuery) -> None:
 
     stats = get_shop_stats()
     text = (
-        "<b>📊 Информация о боте</b>\n\n"
-        "<b>Система:</b>\n"
+        "<b>📰 О боте</b>\n"
+        "──────────────\n"
+        "<b>Система</b>\n"
         f"🤖 ID бота: <code>{callback.bot.id}</code>\n"
         f"👤 Ваш ID: <code>{callback.from_user.id}</code>\n\n"
-        "<b>Магазин:</b>\n"
+        "<b>Магазин</b>\n"
         f"👥 Клиентов: <b>{stats['customers']}</b>\n"
         f"⚙️ Администраторов: <b>{stats['admins']}</b>\n\n"
-        "<b>Товары:</b>\n"
+        "<b>Каталог</b>\n"
         f"📁 Категорий: <b>{stats['categories']}</b>\n"
         f"📦 Товаров: <b>{stats['products']}</b>\n\n"
-        "<b>Заказы:</b>\n"
+        "<b>Заказы</b>\n"
         f"🆕 Новых: <b>{stats['orders_new']}</b>\n"
         f"⚡ В работе: <b>{stats['orders_inwork']}</b>\n"
         f"📂 В архиве: <b>{stats['orders_archive']}</b>\n"
@@ -603,7 +765,9 @@ async def callback_admin_bot_info(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback.message,
         text,
-        reply_markup=_get_admin_menu_kb(),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:insights")]]
+        ),
     )
     await callback.answer()
 
@@ -622,6 +786,50 @@ async def callback_admin_settings(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin:settings:notif")
+async def callback_admin_settings_notif(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    await _safe_edit(
+        callback.message,
+        _admin_settings_notifications_text(),
+        reply_markup=_get_admin_settings_notif_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:settings:payments")
+async def callback_admin_settings_payments(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    await _safe_edit(
+        callback.message,
+        _admin_settings_payments_text(),
+        reply_markup=_get_admin_settings_payments_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:settings:service")
+async def callback_admin_settings_service(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    await _safe_edit(
+        callback.message,
+        "🗂 <b>Сервис</b>\n"
+        "──────────────\n"
+        "<i>Резервные операции и обслуживание данных магазина</i>",
+        reply_markup=_get_admin_settings_service_kb(),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "admin:notif:new")
 async def callback_admin_notif_new(callback: CallbackQuery, state: FSMContext) -> None:
     if not _is_admin(callback.from_user.id):
@@ -634,7 +842,7 @@ async def callback_admin_notif_new(callback: CallbackQuery, state: FSMContext) -
         "Отправьте новый текст шаблона.\n\n"
         "📋 <b>Текущий шаблон:</b>\n"
         f"{get_admin_new_order_template()}",
-        reply_markup=_get_admin_settings_kb(),
+        reply_markup=_get_admin_settings_notif_kb(),
     )
     await callback.answer()
 
@@ -651,7 +859,7 @@ async def callback_admin_notif_status(callback: CallbackQuery, state: FSMContext
         "Отправьте новый текст шаблона.\n\n"
         "📋 <b>Текущий шаблон:</b>\n"
         f"{get_user_status_template()}",
-        reply_markup=_get_admin_settings_kb(),
+        reply_markup=_get_admin_settings_notif_kb(),
     )
     await callback.answer()
 
@@ -667,9 +875,41 @@ async def callback_admin_notif_chat(callback: CallbackQuery, state: FSMContext) 
         "📢 <b>Лог-чат для уведомлений о заказах</b>\n\n"
         "Отправьте <code>chat_id</code> чата (например: <code>-1001234567890</code>).\n"
         "Чтобы отключить — отправьте: <code>off</code>",
-        reply_markup=_get_admin_settings_kb(),
+        reply_markup=_get_admin_settings_notif_kb(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:notif:start_cmd")
+async def callback_admin_notif_start_cmd(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    await state.set_state(AdminNotifications.start_command_description)
+    await callback.message.answer(
+        "⌨️ <b>Текст команды /start</b>\n\n"
+        "Отправьте новый текст описания команды /start в меню Telegram.\n\n"
+        "📋 <b>Текущее значение:</b>\n"
+        f"{get_start_command_description()}",
+        reply_markup=_get_admin_settings_notif_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:notif:client_toggle")
+async def callback_admin_notif_client_toggle(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    set_user_status_notification_enabled(not is_user_status_notification_enabled())
+    await _safe_edit(
+        callback.message,
+        _admin_settings_notifications_text(),
+        reply_markup=_get_admin_settings_notif_kb(),
+    )
+    await callback.answer("✅ Сохранено")
 
 
 @router.callback_query(F.data == "admin:db:backup")
@@ -686,7 +926,14 @@ async def callback_admin_db_backup(callback: CallbackQuery) -> None:
 
         await callback.message.answer_document(
             FSInputFile(backup_path, filename=f"shop_backup_{stamp}.sqlite"),
-            caption="✅ <b>Бэкап базы данных сформирован!</b>\n🗓 " + stamp,
+            caption=(
+                "<b>✅ Бэкап базы</b>\n"
+                "──────────────\n"
+                f"🗓 <code>{stamp}</code>"
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅ К сервису", callback_data="admin:settings:service")]]
+            ),
         )
         await callback.answer("✅ Бэкап отправлен")
     except Exception:
@@ -707,12 +954,15 @@ async def set_admin_new_order_tpl(message: Message, state: FSMContext) -> None:
 
     text = (message.text or "").strip()
     if not text:
-        await message.answer("⚠️ Шаблон не может быть пустым")
+        await message.answer(
+            "<b>⚠ Пустой шаблон</b>\n\n<i>Введите текст уведомления.</i>",
+            reply_markup=_get_admin_settings_notif_kb(),
+        )
         return
 
     set_admin_new_order_template(text)
     await state.clear()
-    await message.answer("✅ <b>Шаблон уведомления админу обновлён!</b>", reply_markup=_get_admin_settings_kb())
+    await message.answer("✅ <b>Шаблон уведомления админу обновлён!</b>", reply_markup=_get_admin_settings_notif_kb())
 
 
 @router.message(AdminNotifications.user_status_template)
@@ -723,12 +973,15 @@ async def set_user_status_tpl(message: Message, state: FSMContext) -> None:
 
     text = (message.text or "").strip()
     if not text:
-        await message.answer("⚠️ Шаблон не может быть пустым")
+        await message.answer(
+            "<b>⚠ Пустой шаблон</b>\n\n<i>Введите текст для клиента.</i>",
+            reply_markup=_get_admin_settings_notif_kb(),
+        )
         return
 
     set_user_status_template(text)
     await state.clear()
-    await message.answer("✅ <b>Шаблон уведомления клиенту обновлён!</b>", reply_markup=_get_admin_settings_kb())
+    await message.answer("✅ <b>Шаблон уведомления клиенту обновлён!</b>", reply_markup=_get_admin_settings_notif_kb())
 
 
 @router.message(AdminNotifications.notify_chat_id)
@@ -741,18 +994,43 @@ async def set_notify_chat(message: Message, state: FSMContext) -> None:
     if text.lower() == "off":
         set_notify_chat_id("")
         await state.clear()
-        await message.answer("🔕 <b>Лог-чат отключён.</b>", reply_markup=_get_admin_settings_kb())
+        await message.answer("🔕 <b>Лог-чат отключён.</b>", reply_markup=_get_admin_settings_notif_kb())
         return
 
     try:
         int(text)
     except ValueError:
-        await message.answer("⚠️ Неверный формат. Пример: <code>-1001234567890</code>")
+        await message.answer(
+            "<b>⚠ Неверный chat_id</b>\n\n"
+            "Пример: <code>-1001234567890</code>\n"
+            "<i>Чтобы отключить — отправьте <code>off</code></i>",
+            reply_markup=_get_admin_settings_notif_kb(),
+        )
         return
 
     set_notify_chat_id(text)
     await state.clear()
-    await message.answer("✅ <b>Лог-чат сохранён!</b>", reply_markup=_get_admin_settings_kb())
+    await message.answer("✅ <b>Лог-чат сохранён!</b>", reply_markup=_get_admin_settings_notif_kb())
+
+
+@router.message(AdminNotifications.start_command_description)
+async def set_start_cmd_description(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(
+            "<b>⚠ Пустое значение</b>\n\n<i>Введите текст для команды /start.</i>",
+            reply_markup=_get_admin_settings_notif_kb(),
+        )
+        return
+
+    set_start_command_description(text)
+    await set_default_commands(message.bot)
+    await state.clear()
+    await message.answer("✅ <b>Текст команды /start обновлён!</b>", reply_markup=_get_admin_settings_notif_kb())
 
 
 @router.callback_query(F.data == "admin:pay:card")
@@ -769,7 +1047,7 @@ async def callback_admin_pay_card(callback: CallbackQuery, state: FSMContext) ->
         "Чтобы отключить — отправьте: <code>off</code>\n\n"
         "📋 <b>Текущие реквизиты:</b>\n"
         f"{current}",
-        reply_markup=_get_admin_settings_kb(),
+        reply_markup=_get_admin_settings_payments_kb(),
     )
     await callback.answer()
 
@@ -783,7 +1061,7 @@ async def callback_admin_pay_cod_toggle(callback: CallbackQuery) -> None:
     current = is_payment_enabled("cod")
     set_payment_enabled("cod", not current)
     status = "✅ включён" if not current else "❌ выключен"
-    await _safe_edit(callback.message, _admin_settings_text(), reply_markup=_get_admin_settings_kb())
+    await _safe_edit(callback.message, _admin_settings_payments_text(), reply_markup=_get_admin_settings_payments_kb())
     await callback.answer(f"🚚 Наложенный платёж {status}")
 
 
@@ -801,7 +1079,7 @@ async def callback_admin_pay_apple(callback: CallbackQuery, state: FSMContext) -
         "Чтобы отключить — отправьте: <code>off</code>\n\n"
         "📋 <b>Текущее значение:</b>\n"
         f"{current}",
-        reply_markup=_get_admin_settings_kb(),
+        reply_markup=_get_admin_settings_payments_kb(),
     )
     await callback.answer()
 
@@ -820,7 +1098,7 @@ async def callback_admin_pay_google(callback: CallbackQuery, state: FSMContext) 
         "Чтобы отключить — отправьте: <code>off</code>\n\n"
         "📋 <b>Текущее значение:</b>\n"
         f"{current}",
-        reply_markup=_get_admin_settings_kb(),
+        reply_markup=_get_admin_settings_payments_kb(),
     )
     await callback.answer()
 
@@ -834,7 +1112,7 @@ async def set_pay_card(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("card", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("✅ <b>Реквизиты банковской карты обновлены!</b>", reply_markup=_get_admin_settings_kb())
+    await message.answer("✅ <b>Реквизиты банковской карты обновлены!</b>", reply_markup=_get_admin_settings_payments_kb())
 
 
 @router.message(AdminPayments.applepay)
@@ -846,7 +1124,7 @@ async def set_pay_apple(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("applepay", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("✅ <b>Настройки Apple Pay обновлены!</b>", reply_markup=_get_admin_settings_kb())
+    await message.answer("✅ <b>Настройки Apple Pay обновлены!</b>", reply_markup=_get_admin_settings_payments_kb())
 
 
 @router.message(AdminPayments.googlepay)
@@ -858,4 +1136,4 @@ async def set_pay_google(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("googlepay", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("✅ <b>Настройки Google Pay обновлены!</b>", reply_markup=_get_admin_settings_kb())
+    await message.answer("✅ <b>Настройки Google Pay обновлены!</b>", reply_markup=_get_admin_settings_payments_kb())

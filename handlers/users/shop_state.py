@@ -58,10 +58,22 @@ class AdminWelcome(StatesGroup):
     photo = State()
 
 
+class AdminMainMenu(StatesGroup):
+    text = State()
+    photo = State()
+
+
+class AdminTextMenu(StatesGroup):
+    name = State()
+    text = State()
+    photo = State()
+
+
 class AdminNotifications(StatesGroup):
     admin_new_order_template = State()
     user_status_template = State()
     notify_chat_id = State()
+    start_command_description = State()
 
 
 class AdminUsers(StatesGroup):
@@ -87,3 +99,15 @@ class AdminPayments(StatesGroup):
 class SupportDialog(StatesGroup):
     user_message = State()
     admin_reply = State()
+
+
+class CartPromoForm(StatesGroup):
+    code = State()
+
+
+class ReviewTextForm(StatesGroup):
+    text = State()
+
+
+class AdminPromoCreate(StatesGroup):
+    line = State()

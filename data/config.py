@@ -129,4 +129,7 @@ bot_description = f"<b>♻ Bot создал Cicada3301</b>\n" \
                   f"<b>⚜ Bot Version:</b> {bot_version}\n" \
                   f"<b>🔗Для выдачи доступов на сутки</b>\n"\
                   f"<b>🎫В случае их нехватки писать ▶️:</b> <a href='https://t.me/satanasat'><b>Cicada</b></a>"
+start_command_description = _settings_get("start_command_description", "🏆ПОДАРИ ДУШЕ ДЖЕКПОТ🏆").strip()
+if not start_command_description:
+    start_command_description = "🏆ПОДАРИ ДУШЕ ДЖЕКПОТ🏆"
 sozdatel = adm[0] if adm else ""

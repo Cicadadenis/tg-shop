@@ -5,7 +5,7 @@ def main_menu_inline_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     if is_admin:
         rows = [
             [
-                InlineKeyboardButton(text="🛘 Каталог", callback_data="menu:catalog"),
+                InlineKeyboardButton(text="🗂 Каталог", callback_data="menu:catalog"),
                 InlineKeyboardButton(text="🪺 Корзина", callback_data="menu:cart"),
             ],
             [
@@ -17,7 +17,7 @@ def main_menu_inline_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     else:
         rows = [
             [
-                InlineKeyboardButton(text="🛘 Каталог", callback_data="menu:catalog"),
+                InlineKeyboardButton(text="🗂 Каталог", callback_data="menu:catalog"),
                 InlineKeyboardButton(text="🪺 Корзина", callback_data="menu:cart"),
             ],
             [
@@ -68,21 +68,18 @@ admin_reply_cancel_kb = InlineKeyboardMarkup(
 )
 
 
-def admin_menu_inline_kb(maintenance_enabled: bool = False) -> InlineKeyboardMarkup:
-    maintenance_indicator = "🔴" if maintenance_enabled else "🟢"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Управление магазином", callback_data="admin:shop")],
-            [InlineKeyboardButton(text="📰 Информация о боте", callback_data="admin:bot_info")],
-            [
-                InlineKeyboardButton(text="📝 Приветствие", callback_data="admin:welcome:edit"),
-                InlineKeyboardButton(text=f"🛠 Тех.работы {maintenance_indicator}", callback_data="admin:maintenance:toggle"),
-            ],
+def admin_menu_inline_kb(maintenance_enabled: bool = False, *, full_access: bool = True) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="🛒 Управление магазином", callback_data="admin:shop")],
+        [InlineKeyboardButton(text="📊 Информация и статистика", callback_data="admin:section:insights")],
+    ]
+    rows.extend(
+        [
             [InlineKeyboardButton(text="⚙ Настройки", callback_data="admin:settings")],
-            [InlineKeyboardButton(text="🛟 Обращения в поддержку", callback_data="admin:support_tickets")],
             [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:main")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def support_tickets_list_kb(tickets: list, *, show_closed: bool = False) -> InlineKeyboardMarkup:
@@ -98,7 +95,7 @@ def support_tickets_list_kb(tickets: list, *, show_closed: bool = False) -> Inli
         rows.append([InlineKeyboardButton(text="🟢 Активные обращения", callback_data="admin:support_tickets")])
     else:
         rows.append([InlineKeyboardButton(text="📁 Завершенные", callback_data="admin:support_tickets:closed")])
-    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -114,22 +111,91 @@ def support_ticket_view_kb(ticket_id: int, status: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_settings_inline_kb(cod_enabled: bool = False, card_enabled: bool = False, applepay_enabled: bool = False, googlepay_enabled: bool = False) -> InlineKeyboardMarkup:
-    cod_indicator = "🟢" if cod_enabled else "🔴"
-    card_indicator = "🟢" if card_enabled else "🔴"
-    applepay_indicator = "🟢" if applepay_enabled else "🔴"
-    googlepay_indicator = "🟢" if googlepay_enabled else "🔴"
-    
+def admin_settings_inline_kb(
+    cod_enabled: bool = False,
+    card_enabled: bool = False,
+    applepay_enabled: bool = False,
+    googlepay_enabled: bool = False,
+    *,
+    client_status_notif: bool = True,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎨 Оформление магазина", callback_data="admin:section:appearance")],
+            [InlineKeyboardButton(text="🔔 Шаблоны и уведомления", callback_data="admin:settings:notif")],
+            [InlineKeyboardButton(text="🗂 Сервис", callback_data="admin:settings:service")],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
+        ]
+    )
+
+
+def admin_settings_notifications_inline_kb(*, client_status_notif: bool = True) -> InlineKeyboardMarkup:
+    status_indicator = "🟢" if client_status_notif else "🔴"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔔 Шаблон: новый заказ", callback_data="admin:notif:new")],
             [InlineKeyboardButton(text="📦 Шаблон: статус клиенту", callback_data="admin:notif:status")],
+            [InlineKeyboardButton(text="✏️ Текст команды /start", callback_data="admin:notif:start_cmd")],
+            [InlineKeyboardButton(text=f"📬 Отправка статуса клиенту {status_indicator}", callback_data="admin:notif:client_toggle")],
             [InlineKeyboardButton(text="📢 Лог-чат заказов", callback_data="admin:notif:chat")],
-            [InlineKeyboardButton(text="🗂 Бэкап БД", callback_data="admin:db:backup")],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:settings")],
+        ]
+    )
+
+
+def admin_settings_payments_inline_kb(
+    cod_enabled: bool = False,
+    card_enabled: bool = False,
+    applepay_enabled: bool = False,
+    googlepay_enabled: bool = False,
+) -> InlineKeyboardMarkup:
+    cod_indicator = "🟢" if cod_enabled else "🔴"
+    card_indicator = "🟢" if card_enabled else "🔴"
+    applepay_indicator = "🟢" if applepay_enabled else "🔴"
+    googlepay_indicator = "🟢" if googlepay_enabled else "🔴"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text=f"💵 Наложенный платеж {cod_indicator}", callback_data="admin:pay:cod:toggle")],
             [InlineKeyboardButton(text=f"💳 Банковская карта {card_indicator}", callback_data="admin:pay:card")],
-            [InlineKeyboardButton(text=f" Apple Pay {applepay_indicator}", callback_data="admin:pay:applepay")],
+            [InlineKeyboardButton(text=f"🍏 Apple Pay {applepay_indicator}", callback_data="admin:pay:applepay")],
             [InlineKeyboardButton(text=f"▶ Google Pay {googlepay_indicator}", callback_data="admin:pay:googlepay")],
-            [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:payments")],
         ]
+    )
+
+
+def admin_settings_service_inline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🗂 Бэкап БД", callback_data="admin:db:backup")],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:settings")],
+        ]
+    )
+
+
+def admin_text_menus_kb(menus: dict) -> InlineKeyboardMarkup:
+    """Клавиатура со списком текстовых меню"""
+    rows = []
+    for menu_id, menu_data in menus.items():
+        rows.append([InlineKeyboardButton(text=f"📝 {menu_data['name']}", callback_data=f"admin:text_menu:{menu_id}")])
+    rows.append([InlineKeyboardButton(text="➕ Создать меню", callback_data="admin:text_menu:new")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_text_menu_actions_kb(menu_id: str) -> InlineKeyboardMarkup:
+    """Клавиатура с действиями для конкретного меню"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"admin:text_menu:edit:{menu_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin:text_menu:delete:{menu_id}")],
+            [InlineKeyboardButton(text="⬅ Назад к меню", callback_data="admin:text_menus")],
+        ]
+    )
+
+
+def admin_text_menu_cancel_kb() -> InlineKeyboardMarkup:
+    """Клавиатура для отмены создания/редактирования меню"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:text_menus")]]
     )
