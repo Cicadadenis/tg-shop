@@ -255,7 +255,7 @@ def _filter_orders_by_receipt(orders: list[dict], flt: str) -> tuple[list[dict],
 async def _render_admin_categories(message: Message, viewer_id: int) -> None:
     categories = list_categories()
     if not categories:
-        await _safe_edit(message, "Категорий пока нет", reply_markup=admin_categories_kb([]))
+        await _safe_edit(message, "📂 Категорий пока нет", reply_markup=admin_categories_kb([]))
         return
     await _safe_edit(message, "<b>🗂 Категории</b>", reply_markup=admin_categories_kb(categories))
 
@@ -483,7 +483,7 @@ async def search_run(message: Message, state: FSMContext) -> None:
     query = (message.text or "").strip()
     await state.clear()
     if not query:
-        await message.answer("Пустой запрос")
+        await message.answer("⚠️ Пустой запрос", reply_markup=back_menu_kb("menu:catalog"))
         return
 
     await _set_catalog_state(
@@ -738,7 +738,7 @@ async def checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
     ds = get_delivery_settings()
     await _safe_edit(
         callback.message,
-        "Выберите способ доставки:",
+        "🚚 Выберите способ доставки:",
         reply_markup=checkout_delivery_kb(nova=ds["nova"], city=ds["city"], pickup=ds["pickup"]),
     )
     await callback.answer()
@@ -753,7 +753,7 @@ async def checkout_delivery_select(callback: CallbackQuery, state: FSMContext) -
     if delivery_key == "city":
         # Особый флоу для доставки По городу
         await state.set_state(CheckoutForm.city_recip_name)
-        await _safe_edit(callback.message, "🏙 Доставка по городу\n\nВведите имя получателя:", reply_markup=back_menu_kb("menu:cart"))
+        await _safe_edit(callback.message, "🏙 Доставка по городу\n\n👤 Введите имя получателя:", reply_markup=back_menu_kb("menu:cart"))
         await callback.answer()
         return
 
@@ -771,14 +771,14 @@ async def checkout_delivery_select(callback: CallbackQuery, state: FSMContext) -
         await state.set_state(CheckoutForm.payment)
         await _safe_edit(
             callback.message,
-            f"Доставка: <b>{delivery_label}</b>\nДанные получателя взяты из личного кабинета.\nВыберите оплату:",
+            f"🚚 Доставка: <b>{delivery_label}</b>\nДанные получателя взяты из личного кабинета.\n\n💳 Выберите способ оплаты:",
             reply_markup=checkout_payment_kb(_available_payment_methods()),
         )
         await callback.answer()
         return
 
     await state.set_state(CheckoutForm.first_name)
-    await _safe_edit(callback.message, "Введите имя получателя:", reply_markup=back_menu_kb("menu:cart"))
+    await _safe_edit(callback.message, "👤 Введите имя получателя:", reply_markup=back_menu_kb("menu:cart"))
     await callback.answer()
 
 
@@ -793,7 +793,7 @@ async def checkout_city_recip_name(message: Message, state: FSMContext) -> None:
     await state.update_data(checkout_full_name=name)
     await state.set_state(CheckoutForm.city_recip_address)
     await message.answer(
-        "Введите адрес доставки (улица, дом и подъезд):",
+        "📍 Введите адрес доставки (улица, дом, подъезд):",
         reply_markup=back_menu_kb("menu:cart"),
     )
 
@@ -809,7 +809,7 @@ async def checkout_city_recip_address(message: Message, state: FSMContext) -> No
         return
     await state.update_data(checkout_delivery_address=address)
     await state.set_state(CheckoutForm.city_recip_phone)
-    await message.answer("Введите номер телефона получателя:")
+    await message.answer("📞 Введите номер телефона получателя:")
 
 
 @router.message(CheckoutForm.city_recip_phone)
@@ -821,7 +821,7 @@ async def checkout_city_recip_phone(message: Message, state: FSMContext) -> None
     await state.update_data(checkout_phone=phone)
     await state.set_state(CheckoutForm.payment)
     await message.answer(
-        "Выберите оплату:",
+        "💳 Выберите способ оплаты:",
         reply_markup=checkout_city_payment_kb(),
     )
 
@@ -834,7 +834,7 @@ async def checkout_first_name(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(first_name=first_name)
     await state.set_state(CheckoutForm.last_name)
-    await message.answer("Введите фамилию получателя:")
+    await message.answer("📝 Введите фамилию получателя:")
 
 
 @router.message(CheckoutForm.last_name)
@@ -845,7 +845,7 @@ async def checkout_last_name(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(last_name=last_name)
     await state.set_state(CheckoutForm.middle_name)
-    await message.answer("Введите отчество получателя:")
+    await message.answer("📝 Введите отчество получателя:")
 
 
 @router.message(CheckoutForm.middle_name)
@@ -856,7 +856,7 @@ async def checkout_middle_name(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(middle_name=middle_name)
     await state.set_state(CheckoutForm.phone)
-    await message.answer("Введите номер телефона:")
+    await message.answer("📞 Введите номер телефона:")
 
 
 @router.message(CheckoutForm.phone)
@@ -868,7 +868,7 @@ async def checkout_phone(message: Message, state: FSMContext) -> None:
 
     await state.update_data(phone=phone)
     await state.set_state(CheckoutForm.city)
-    await message.answer("Введите город:")
+    await message.answer("🏙 Введите город:")
 
 
 @router.message(CheckoutForm.city)
@@ -879,20 +879,20 @@ async def checkout_city(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(city=city)
     await state.set_state(CheckoutForm.branch)
-    await message.answer("Введите отделение Новой почты:")
+    await message.answer("📮 Введите номер отделения Новой почты:")
 
 
 @router.message(CheckoutForm.branch)
 async def checkout_branch(message: Message, state: FSMContext) -> None:
     branch = (message.text or "").strip()
     if len(branch) < 1:
-        await message.answer("Введите отделение Новой почты")
+        await message.answer("⚠️ Введите номер отделения Новой почты")
         return
 
     await state.update_data(branch=branch)
     await state.set_state(CheckoutForm.payment)
     await message.answer(
-        "Выберите оплату:",
+        "💳 Выберите способ оплаты:",
         reply_markup=checkout_payment_kb(_available_payment_methods()),
     )
 
@@ -949,18 +949,23 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
     if bonus > 0:
-        await state.set_state(CheckoutForm.bonus_confirm)
         cart_sum = cart_total(callback.from_user.id)
-        await _safe_edit(
-            callback.message,
-            f"🎁 У вас есть бонус: <b>{bonus} грн</b>\n"
-            f"Сумма заказа: <b>{cart_sum} грн</b>\n"
-            f"С бонусом: <b>{max(1, cart_sum - bonus)} грн</b>\n\n"
-            "Использовать бонус?",
-            reply_markup=checkout_bonus_kb(bonus),
-        )
-        await callback.answer()
-        return
+        max_bonus_to_apply = max(0, cart_sum - 1)
+        bonus_to_apply = min(bonus, max_bonus_to_apply)
+
+        if bonus_to_apply > 0:
+            await state.set_state(CheckoutForm.bonus_confirm)
+            await _safe_edit(
+                callback.message,
+                f"🎁 У вас есть бонус: <b>{bonus} грн</b>\n"
+                f"Сумма заказа: <b>{cart_sum} грн</b>\n"
+                f"Будет применено: <b>{bonus_to_apply} грн</b>\n"
+                f"С бонусом: <b>{cart_sum - bonus_to_apply} грн</b>\n\n"
+                "Использовать бонус?",
+                reply_markup=checkout_bonus_kb(bonus_to_apply),
+            )
+            await callback.answer()
+            return
 
     await _finalize_checkout(callback, state, use_bonus=False)
 
@@ -975,7 +980,10 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
     delivery = data.get("checkout_delivery", DELIVERY_NOVA)
     user_id = callback.from_user.id
 
-    bonus = get_user_bonus(user_id) if use_bonus else 0
+    cart_sum = cart_total(user_id)
+    available_bonus = get_user_bonus(user_id) if use_bonus else 0
+    max_bonus_to_apply = max(0, cart_sum - 1)
+    applied_bonus = min(available_bonus, max_bonus_to_apply)
 
     ok, payload = create_order_from_cart(
         user_id,
@@ -984,7 +992,7 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
         address=delivery_address,
         delivery=delivery,
         payment=payment,
-        discount=bonus,
+        discount=applied_bonus,
     )
     await state.clear()
 
@@ -992,8 +1000,8 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
         await callback.answer(payload, show_alert=True)
         return
 
-    if use_bonus and bonus > 0:
-        set_user_bonus(user_id, 0)
+    if use_bonus and applied_bonus > 0:
+        set_user_bonus(user_id, available_bonus - applied_bonus)
 
     order = get_order(payload)
     if order:
@@ -1042,14 +1050,14 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
 
     payment_info = _payment_instruction_text(key)
     can_send_receipt = key in PREPAID_METHODS
-    bonus_line = f"\n🎁 Бонус применён: <b>-{bonus} грн</b>" if use_bonus and bonus > 0 else ""
+    bonus_line = f"\n🎁 Бонус применён: <b>-{applied_bonus} грн</b>" if use_bonus and applied_bonus > 0 else ""
     total_line = f"\nСумма к оплате: <b>{order['total']} грн</b>" if order else ""
     await _safe_edit(
         callback.message,
-        f"✅ Заказ оформлен\nНомер: <code>{payload}</code>{total_line}{bonus_line}{payment_info}",
+        f"✅ <b>Заказ оформлен!</b>\n📋 Номер: <code>{payload}</code>{total_line}{bonus_line}{payment_info}",
         reply_markup=order_detail_kb(payload, back_target="menu:orders", can_send_receipt=can_send_receipt),
     )
-    await callback.answer("Готово")
+    await callback.answer("✅ Готово!")
 
 
 @router.callback_query(CheckoutForm.bonus_confirm, F.data == "shop:bonus:use")
@@ -1386,7 +1394,7 @@ async def order_receipt_invalid(message: Message) -> None:
 @router.callback_query(F.data == "profile:edit")
 async def profile_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ProfileForm.first_name)
-    await _safe_edit(callback.message, "Введите имя:", reply_markup=back_menu_kb("menu:profile"))
+    await _safe_edit(callback.message, "👤 Введите имя:", reply_markup=back_menu_kb("menu:profile"))
     await callback.answer()
 
 
@@ -1398,7 +1406,7 @@ async def profile_first_name_save(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(first_name=first_name)
     await state.set_state(ProfileForm.last_name)
-    await message.answer("Введите фамилию:")
+    await message.answer("📝 Введите фамилию:")
 
 
 @router.message(ProfileForm.last_name)
@@ -1409,7 +1417,7 @@ async def profile_last_name_save(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(last_name=last_name)
     await state.set_state(ProfileForm.middle_name)
-    await message.answer("Введите отчество:")
+    await message.answer("📝 Введите отчество:")
 
 
 @router.message(ProfileForm.middle_name)
@@ -1420,7 +1428,7 @@ async def profile_middle_name_save(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(middle_name=middle_name)
     await state.set_state(ProfileForm.phone)
-    await message.answer("Введите телефон:")
+    await message.answer("📞 Введите телефон:")
 
 
 @router.message(ProfileForm.phone)
@@ -1431,7 +1439,7 @@ async def profile_phone_save(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(phone=phone)
     await state.set_state(ProfileForm.city)
-    await message.answer("Введите город:")
+    await message.answer("🏙 Введите город:")
 
 
 @router.message(ProfileForm.city)
@@ -1442,14 +1450,14 @@ async def profile_city_save(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(city=city)
     await state.set_state(ProfileForm.branch)
-    await message.answer("Введите отделение Новой почты:")
+    await message.answer("📮 Введите номер отделения Новой почты:")
 
 
 @router.message(ProfileForm.branch)
 async def profile_branch_save(message: Message, state: FSMContext) -> None:
     branch = (message.text or "").strip()
     if len(branch) < 1:
-        await message.answer("Введите отделение Новой почты")
+        await message.answer("⚠️ Введите номер отделения Новой почты")
         return
 
     data = await state.get_data()
@@ -1470,7 +1478,7 @@ async def profile_branch_save(message: Message, state: FSMContext) -> None:
         address=address,
     )
     await state.clear()
-    await message.answer("Данные обновлены", reply_markup=profile_actions_inline_kb)
+    await message.answer("✅ Данные профиля обновлены!", reply_markup=profile_actions_inline_kb)
 
 
 @router.callback_query(F.data == "admin:maintenance:toggle")
@@ -1484,7 +1492,7 @@ async def admin_toggle_maintenance(callback: CallbackQuery) -> None:
         await callback.message.edit_reply_markup(reply_markup=admin_menu_inline_kb(maintenance_enabled=enabled))
     except TelegramBadRequest:
         pass
-    await callback.answer("Тех.работы ВКЛ" if enabled else "Тех.работы ВЫКЛ", show_alert=True)
+    await callback.answer("🛠 Тех.работы ВКЛЮЧЕНЫ" if enabled else "✅ Тех.работы ВЫКЛЮЧЕНЫ", show_alert=True)
 
 
 @router.callback_query(F.data == "admin:welcome:edit")
@@ -1494,7 +1502,7 @@ async def admin_welcome_start(callback: CallbackQuery, state: FSMContext) -> Non
         return
 
     await state.set_state(AdminWelcome.text)
-    await _safe_edit(callback.message, "Введите новый текст стартового сообщения:", reply_markup=back_admin_kb())
+    await _safe_edit(callback.message, "✏️ Введите новый текст стартового сообщения:", reply_markup=back_admin_kb())
     await callback.answer()
 
 
@@ -1502,7 +1510,10 @@ async def admin_welcome_start(callback: CallbackQuery, state: FSMContext) -> Non
 async def admin_welcome_text(message: Message, state: FSMContext) -> None:
     await state.update_data(welcome_text=(message.text or "").strip())
     await state.set_state(AdminWelcome.photo)
-    await message.answer("Отправьте фото для стартового сообщения или '-' без фото")
+    await message.answer(
+        "🖼 Отправьте фото для стартового сообщения или «-» для сохранения без фото:",
+        reply_markup=back_admin_kb("admin:shop"),
+    )
 
 
 @router.message(AdminWelcome.photo, F.photo)
@@ -1510,19 +1521,22 @@ async def admin_welcome_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     set_welcome_message(data.get("welcome_text", "Добро пожаловать"), message.photo[-1].file_id)
     await state.clear()
-    await message.answer("✅ Стартовое сообщение обновлено (с фото)")
+    await message.answer("✅ Стартовое сообщение обновлено (с фото)", reply_markup=back_admin_kb("admin:shop"))
 
 
 @router.message(AdminWelcome.photo)
 async def admin_welcome_no_photo(message: Message, state: FSMContext) -> None:
     if (message.text or "").strip() != "-":
-        await message.answer("Отправьте фото или '-' чтобы сохранить без фото")
+        await message.answer(
+            "⚠️ Отправьте фото или «-» чтобы сохранить без фото:",
+            reply_markup=back_admin_kb("admin:shop"),
+        )
         return
 
     data = await state.get_data()
     set_welcome_message(data.get("welcome_text", "Добро пожаловать"), "")
     await state.clear()
-    await message.answer("✅ Стартовое сообщение обновлено (без фото)")
+    await message.answer("✅ Стартовое сообщение обновлено (без фото)", reply_markup=back_admin_kb("admin:shop"))
 
 
 @router.callback_query(F.data == "admin:shop")
@@ -1690,7 +1704,7 @@ async def admin_category_add_start(callback: CallbackQuery, state: FSMContext) -
         return
 
     await state.set_state(AdminCategory.name)
-    await _safe_edit(callback.message, "Введите название новой категории:", reply_markup=back_admin_kb("admin:categories"))
+    await _safe_edit(callback.message, "📂 Введите название новой категории:", reply_markup=back_admin_kb("admin:categories"))
     await callback.answer()
 
 
@@ -1755,7 +1769,7 @@ async def admin_add_category(callback: CallbackQuery, state: FSMContext) -> None
         return
     await state.update_data(category=cat["name"])
     await state.set_state(AdminAddProduct.name)
-    await _safe_edit(callback.message, "Название товара:")
+    await _safe_edit(callback.message, "📝 Введите название товара:", reply_markup=back_admin_kb("admin:categories"))
     await callback.answer()
 
 
@@ -1763,7 +1777,7 @@ async def admin_add_category(callback: CallbackQuery, state: FSMContext) -> None
 async def admin_add_name(message: Message, state: FSMContext) -> None:
     await state.update_data(name=(message.text or "").strip())
     await state.set_state(AdminAddProduct.price)
-    await message.answer("Цена (число):")
+    await message.answer("💰 Цена (число, в грн):")
 
 
 @router.message(AdminAddProduct.price)
@@ -1773,14 +1787,14 @@ async def admin_add_price(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(price=int(message.text))
     await state.set_state(AdminAddProduct.description)
-    await message.answer("Описание товара:")
+    await message.answer("📄 Введите описание товара:")
 
 
 @router.message(AdminAddProduct.description)
 async def admin_add_description(message: Message, state: FSMContext) -> None:
     await state.update_data(description=(message.text or "").strip())
     await state.set_state(AdminAddProduct.stock)
-    await message.answer("Количество на складе:")
+    await message.answer("📦 Введите количество на складе:")
 
 
 @router.message(AdminAddProduct.stock)
@@ -1790,7 +1804,7 @@ async def admin_add_stock(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(stock=int(message.text))
     await state.set_state(AdminAddProduct.photo)
-    await message.answer("Отправьте фото товара или '-' для пропуска")
+    await message.answer("🖼 Отправьте фото товара или «-» для пропуска:")
 
 
 @router.message(AdminAddProduct.photo, F.photo)
@@ -1809,13 +1823,13 @@ async def admin_add_photo(message: Message, state: FSMContext) -> None:
         brand=data.get("brand", ""),
     )
     await state.clear()
-    await message.answer(f"✅ Товар добавлен. ID: {product_id}", reply_markup=back_admin_kb())
+    await message.answer(f"✅ <b>Товар добавлен!</b>\n🆔 ID: <code>{product_id}</code>", reply_markup=back_admin_kb("admin:product:list"))
 
 
 @router.message(AdminAddProduct.photo)
 async def admin_add_no_photo(message: Message, state: FSMContext) -> None:
     if (message.text or "").strip() != "-":
-        await message.answer("Отправьте фото или '-' для пропуска")
+        await message.answer("⚠️ Отправьте фото или «-» для пропуска:")
         return
 
     data = await state.get_data()
@@ -1832,7 +1846,7 @@ async def admin_add_no_photo(message: Message, state: FSMContext) -> None:
         brand=data.get("brand", ""),
     )
     await state.clear()
-    await message.answer(f"✅ Товар добавлен. ID: {product_id}", reply_markup=back_admin_kb())
+    await message.answer(f"✅ <b>Товар добавлен!</b>\n🆔 ID: <code>{product_id}</code>", reply_markup=back_admin_kb("admin:product:list"))
 
 
 @router.callback_query(F.data == "admin:product:list")
@@ -1843,11 +1857,11 @@ async def admin_products(callback: CallbackQuery) -> None:
 
     products = get_admin_products()
     if not products:
-        await _safe_edit(callback.message, "Товаров нет", reply_markup=admin_shop_kb(_is_owner(callback.from_user.id)))
+        await _safe_edit(callback.message, "📦 Товаров пока нет", reply_markup=admin_shop_kb(_is_owner(callback.from_user.id)))
         await callback.answer()
         return
 
-    await _safe_edit(callback.message, "<b>Товары</b>", reply_markup=admin_products_kb(products))
+    await _safe_edit(callback.message, "📦 <b>Товары</b>", reply_markup=admin_products_kb(products))
     await callback.answer()
 
 
@@ -1860,11 +1874,11 @@ async def admin_product_view(callback: CallbackQuery) -> None:
         return
 
     text = (
-        f"<b>{product['name']}</b>\n"
-        f"ID: <code>{product['id']}</code>\n"
-        f"Цена: <b>{product['price']} грн</b>\n"
-        f"Остаток: <b>{product['stock']} шт</b>\n"
-        f"Категория: <b>{product['category_name']}</b>\n"
+        f"📦 <b>{product['name']}</b>\n"
+        f"🆔 ID: <code>{product['id']}</code>\n"
+        f"💰 Цена: <b>{product['price']} грн</b>\n"
+        f"📊 Остаток: <b>{product['stock']} шт</b>\n"
+        f"📂 Категория: <b>{product['category_name']}</b>\n\n"
         f"{product['description']}"
     )
     await _safe_edit(callback.message, text, reply_markup=admin_product_actions_kb(product_id))
@@ -1876,7 +1890,7 @@ async def admin_edit_price_start(callback: CallbackQuery, state: FSMContext) -> 
     product_id = int(callback.data.split(":")[-1])
     await state.set_state(AdminEditProduct.price)
     await state.update_data(edit_product_id=product_id)
-    await _safe_edit(callback.message, "Введите новую цену:", reply_markup=back_admin_kb())
+    await _safe_edit(callback.message, "💰 Введите новую цену (грн):", reply_markup=back_admin_kb())
     await callback.answer()
 
 
@@ -1888,7 +1902,7 @@ async def admin_edit_price(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     update_product(int(data["edit_product_id"]), price=int(message.text))
     await state.clear()
-    await message.answer("Цена обновлена")
+    await message.answer("✅ Цена обновлена", reply_markup=back_admin_kb())
 
 
 @router.callback_query(F.data.startswith("admin:product:stock:"))
@@ -1896,7 +1910,7 @@ async def admin_edit_stock_start(callback: CallbackQuery, state: FSMContext) -> 
     product_id = int(callback.data.split(":")[-1])
     await state.set_state(AdminEditProduct.stock)
     await state.update_data(edit_product_id=product_id)
-    await _safe_edit(callback.message, "Введите новый остаток:", reply_markup=back_admin_kb())
+    await _safe_edit(callback.message, "📊 Введите новый остаток (шт):", reply_markup=back_admin_kb())
     await callback.answer()
 
 
@@ -1908,7 +1922,7 @@ async def admin_edit_stock(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     update_product(int(data["edit_product_id"]), stock=int(message.text))
     await state.clear()
-    await message.answer("Остаток обновлен")
+    await message.answer("✅ Остаток обновлён", reply_markup=back_admin_kb())
 
 
 @router.callback_query(F.data.startswith("admin:product:photo:"))
@@ -1916,7 +1930,7 @@ async def admin_edit_photo_start(callback: CallbackQuery, state: FSMContext) -> 
     product_id = int(callback.data.split(":")[-1])
     await state.set_state(AdminEditProduct.photo)
     await state.update_data(edit_product_id=product_id)
-    await _safe_edit(callback.message, "Отправьте новое фото товара", reply_markup=back_admin_kb())
+    await _safe_edit(callback.message, "🖼 Отправьте новое фото товара:", reply_markup=back_admin_kb())
     await callback.answer()
 
 
@@ -1925,14 +1939,14 @@ async def admin_edit_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     update_product(int(data["edit_product_id"]), photo=message.photo[-1].file_id)
     await state.clear()
-    await message.answer("Фото обновлено")
+    await message.answer("✅ Фото обновлено", reply_markup=back_admin_kb())
 
 
 @router.callback_query(F.data.startswith("admin:product:delete:"))
 async def admin_delete_product(callback: CallbackQuery) -> None:
     product_id = int(callback.data.split(":")[-1])
     delete_product(product_id)
-    await _safe_edit(callback.message, "Товар удален", reply_markup=admin_shop_kb(_is_owner(callback.from_user.id)))
+    await _safe_edit(callback.message, "🗑 <b>Товар удалён</b>", reply_markup=admin_shop_kb(_is_owner(callback.from_user.id)))
     await callback.answer()
 
 
@@ -1940,7 +1954,7 @@ async def admin_delete_product(callback: CallbackQuery) -> None:
 async def admin_orders(callback: CallbackQuery) -> None:
     orders = list_all_orders(limit=100)
     if not orders:
-        await _safe_edit(callback.message, "Заказов пока нет", reply_markup=admin_shop_kb(_is_owner(callback.from_user.id)))
+        await _safe_edit(callback.message, "📋 Заказов пока нет", reply_markup=admin_shop_kb(_is_owner(callback.from_user.id)))
         await callback.answer()
         return
 
@@ -1949,7 +1963,7 @@ async def admin_orders(callback: CallbackQuery) -> None:
     has_archive = any(o.get("status_raw", "") in _ARCHIVE_STATUSES for o in orders)
     await _safe_edit(
         callback.message,
-        "<b>Список заказов</b>\nВыберите раздел:",
+        "📋 <b>Список заказов</b>\nВыберите раздел:",
         reply_markup=admin_orders_menu_kb(has_new=has_new, has_inwork=has_inwork, has_archive=has_archive),
     )
     await callback.answer()
@@ -2257,7 +2271,7 @@ async def admin_users_list(callback: CallbackQuery) -> None:
 
     users = list_customer_users()
     if not users:
-        await _safe_edit(callback.message, "Клиентов пока нет", reply_markup=admin_shop_kb(_is_owner(callback.from_user.id)))
+        await _safe_edit(callback.message, "👥 Клиентов пока нет", reply_markup=admin_shop_kb(_is_owner(callback.from_user.id)))
         await callback.answer()
         return
 
@@ -2299,13 +2313,19 @@ async def admin_add_admin_finish(message: Message, state: FSMContext) -> None:
 
     raw_value = (message.text or "").strip()
     if not raw_value.isdigit():
-        await message.answer("Нужен числовой Telegram ID")
+        await message.answer(
+            "⚠️ Нужен числовой Telegram ID",
+            reply_markup=back_admin_kb("admin:admins:list"),
+        )
         return
 
     target_user_id = int(raw_value)
     add_admin_user(target_user_id)
     await state.clear()
-    await message.answer(f"Пользователь <code>{target_user_id}</code> теперь админ.")
+    await message.answer(
+        f"✅ Пользователь <code>{target_user_id}</code> теперь админ.",
+        reply_markup=back_admin_kb("admin:admins:list"),
+    )
 
 
 @router.callback_query(F.data.startswith("admin:user:view:"))
@@ -2450,7 +2470,7 @@ async def admin_user_bonus_set(message: Message, state: FSMContext) -> None:
 
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите целое число (например: 150):")
+        await message.answer("⚠️ Введите целое число (например: 150):")
         return
 
     amount = int(raw)
@@ -2519,33 +2539,40 @@ async def admin_user_message_send(message: Message, state: FSMContext) -> None:
         return
 
     text = (message.text or "").strip()
-    if not text:
-        await message.answer("Сообщение не может быть пустым")
-        return
-
     data = await state.get_data()
     target_user_id = int(data.get("target_user_id", 0))
     back_target = str(data.get("message_back_target", "admin:shop"))
+
+    if not text:
+        await message.answer(
+            "⚠️ Сообщение не может быть пустым",
+            reply_markup=back_admin_kb(back_target),
+        )
+        return
+
     await state.clear()
 
     if not target_user_id:
-        await message.answer("Не найден получатель")
+        await message.answer("❌ Не найден получатель", reply_markup=back_admin_kb("admin:shop"))
         return
 
     try:
         await message.bot.send_message(target_user_id, text)
         await message.answer(
-            f"Сообщение отправлено пользователю <code>{target_user_id}</code>.",
+            f"✅ Сообщение отправлено пользователю <code>{target_user_id}</code>.",
             reply_markup=back_admin_kb(back_target),
         )
     except Exception:
-        await message.answer("Не удалось отправить сообщение. Возможно, пользователь не запускал бота или заблокировал его.")
+        await message.answer(
+            "❌ Не удалось отправить сообщение. Возможно, пользователь не запускал бота или заблокировал его.",
+            reply_markup=back_admin_kb(back_target),
+        )
 
 
 @router.callback_query(F.data == "admin:broadcast")
 async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminBroadcast.text)
-    await _safe_edit(callback.message, "Введите текст рассылки:", reply_markup=back_admin_kb())
+    await _safe_edit(callback.message, "📢 <b>Рассылка</b>\n\nВведите текст сообщения для всех пользователей:", reply_markup=back_admin_kb())
     await callback.answer()
 
 
@@ -2561,7 +2588,10 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
         except Exception:
             pass
     await state.clear()
-    await message.answer(f"Рассылка завершена. Отправлено: {sent}")
+    await message.answer(
+        f"✅ Рассылка завершена.\n📨 Отправлено: <b>{sent}</b>",
+        reply_markup=back_admin_kb("admin:shop"),
+    )
 
 
 @router.callback_query(F.data == "admin:stats")
