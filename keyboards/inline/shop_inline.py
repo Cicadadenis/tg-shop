@@ -3,9 +3,9 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 def _role_label(role: str) -> str:
     return {
-        "owner": "главный",
-        "admin": "админ",
-        "user": "клиент",
+        "owner": "👑 главный",
+        "admin": "🛡 админ",
+        "user": "👤 клиент",
     }.get(role, role)
 
 
@@ -153,7 +153,7 @@ def orders_new_kb(orders: list[dict]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{order['order_id']} | {order['total']} грн | {order['status']}",
+                text=f"🔵 {order['order_id']} · {order['total']} грн",
                 callback_data=f"shop:order:{order['order_id']}",
             )
         ]
@@ -168,7 +168,7 @@ def orders_inwork_kb(orders: list[dict]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{order['order_id']} | {order['total']} грн | {order['status']}",
+                text=f"🔄 {order['order_id']} · {order['total']} грн",
                 callback_data=f"shop:order:{order['order_id']}",
             )
         ]
@@ -183,7 +183,7 @@ def orders_archive_kb(orders: list[dict]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{order['order_id']} | {order['total']} грн | {order['status']}",
+                text=f"📁 {order['order_id']} · {order['total']} грн",
                 callback_data=f"shop:order:{order['order_id']}",
             )
         ]
@@ -192,13 +192,14 @@ def orders_archive_kb(orders: list[dict]) -> InlineKeyboardMarkup:
     ]
     rows.append([InlineKeyboardButton(text="⬅ К заказам", callback_data="menu:orders")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def orders_list_kb(orders: list[dict]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{order['order_id']} | {order['total']} грн | {order['status']}",
+                text=f"📦 {order['order_id']} · {order['total']} грн · {order['status']}",
                 callback_data=f"shop:order:{order['order_id']}",
             )
         ]
@@ -220,7 +221,7 @@ def wishlist_kb(products: list[dict], *, page: int, total_pages: int) -> InlineK
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{product['name']} | {product['price']} грн | {'В наличии' if product['stock'] > 0 else 'Нет в наличии'}",
+                text=f"{'✅' if product['stock'] > 0 else '❌'} {product['name']} | {product['price']} грн",
                 callback_data=f"shop:product:{product['id']}",
             )
         ]
@@ -247,7 +248,7 @@ def wishlist_kb(products: list[dict], *, page: int, total_pages: int) -> InlineK
 def admin_shop_kb(can_manage_admins: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(text="➕ Добавить", callback_data="admin:product:add"),
+            InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:product:add"),
             InlineKeyboardButton(text="📦 Товары", callback_data="admin:product:list"),
         ],
         [
@@ -261,13 +262,15 @@ def admin_shop_kb(can_manage_admins: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🛡 Админы", callback_data="admin:admins:list")],
     ]
     if can_manage_admins:
-        rows.append([InlineKeyboardButton(text="➕ Выдать админа", callback_data="admin:admins:add")])
+        rows.append([InlineKeyboardButton(text="➕ Выдать права админа", callback_data="admin:admins:add")])
     rows.extend(
         [
-            [InlineKeyboardButton(text="🚕 Способы доставки", callback_data="admin:delivery:settings")],            [
+            [InlineKeyboardButton(text="🚚 Способы доставки", callback_data="admin:delivery:settings")],
+            [
                 InlineKeyboardButton(text="📤 Экспорт каталога", callback_data="admin:catalog:export"),
                 InlineKeyboardButton(text="📥 Импорт каталога", callback_data="admin:catalog:import"),
-            ],            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+            ],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
             [InlineKeyboardButton(text="⬅ Админ меню", callback_data="menu:admin")],
         ]
     )
@@ -278,7 +281,7 @@ def admin_products_kb(products: list[dict]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{product['name']} | {product['price']} грн | {product['stock']} шт",
+                text=f"{'✅' if product['stock'] > 0 else '❌'} {product['name']} · {product['price']} грн · {product['stock']} шт",
                 callback_data=f"admin:product:view:{product['id']}",
             )
         ]
@@ -315,6 +318,7 @@ def checkout_delivery_kb(
         rows.append([InlineKeyboardButton(text="🚕 По городу", callback_data="shop:delivery:city")])
     if pickup:
         rows.append([InlineKeyboardButton(text="🏠 Самовывоз", callback_data="shop:delivery:pickup")])
+    rows.append([InlineKeyboardButton(text="⬅ Корзина", callback_data="menu:cart")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -323,6 +327,7 @@ def checkout_city_payment_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Банковская карта", callback_data="shop:pay:card")],
+            [InlineKeyboardButton(text="⬅ Корзина", callback_data="menu:cart")],
         ]
     )
 
@@ -332,6 +337,7 @@ def checkout_payment_kb(payment_methods: list[tuple[str, str]]) -> InlineKeyboar
         [InlineKeyboardButton(text=label, callback_data=f"shop:pay:{code}")]
         for code, label in payment_methods
     ]
+    rows.append([InlineKeyboardButton(text="⬅ Корзина", callback_data="menu:cart")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -340,6 +346,7 @@ def checkout_bonus_kb(bonus: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=f"✅ Использовать бонус ({bonus} грн)", callback_data="shop:bonus:use")],
             [InlineKeyboardButton(text="➡️ Продолжить без бонуса", callback_data="shop:bonus:skip")],
+            [InlineKeyboardButton(text="⬅ Корзина", callback_data="menu:cart")],
         ]
     )
 
@@ -359,7 +366,7 @@ def admin_orders_kb(orders: list[dict]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{order['order_id']} | {order['total']} грн | {order['status']}",
+                text=f"📦 {order['order_id']} · {order['total']} грн · {order['status']}",
                 callback_data=f"admin:order:view:{order['order_id']}",
             )
         ]
@@ -506,12 +513,13 @@ def admin_user_actions_kb(
 
 
 def product_rating_kb(order_id: str, product_id: int) -> InlineKeyboardMarkup:
-    stars = ["0⭐", "1⭐", "2⭐", "3⭐", "4⭐", "5⭐"]
+    stars = ["1 ⭐", "2 ⭐⭐", "3 ⭐⭐⭐", "4 ⭐⭐⭐⭐", "5 ⭐⭐⭐⭐⭐"]
     buttons = [
-        InlineKeyboardButton(text=s, callback_data=f"shop:rate:{order_id}:{product_id}:{i}")
+        InlineKeyboardButton(text=s, callback_data=f"shop:rate:{order_id}:{product_id}:{i+1}")
         for i, s in enumerate(stars)
     ]
     rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:orders")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
