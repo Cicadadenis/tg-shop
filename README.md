@@ -1,4 +1,4 @@
-<div align="center">
+tg-shopg-shopdiv align="center">
 
 # TG Shop Bot
 
@@ -93,7 +93,7 @@ tg-shop/
 ### 1. Скопируйте проект
 
 ```bash
-git clone <url-репозитория> tg-shop
+git clone https://github.com/Cicadadenis/tg-shop.git
 cd tg-shop
 ```
 
