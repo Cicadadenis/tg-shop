@@ -125,8 +125,8 @@ def admin_settings_inline_kb(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎨 Витрина · /start · главное меню", callback_data="admin:section:appearance")],
             [InlineKeyboardButton(text="🔔 Шаблоны · статусы · лог-чат", callback_data="admin:settings:notif")],
-            [InlineKeyboardButton(text="🕐 Время работы · поддержка и доставка по городу", callback_data="admin:settings:business_hours")],
-            [InlineKeyboardButton(text=f"🛠 Техработы магазина · для клиентов {maint_ind}", callback_data="admin:maintenance:toggle")],
+            [InlineKeyboardButton(text="🕐 Время работы", callback_data="admin:settings:business_hours")],
+            [InlineKeyboardButton(text=f"🛠 Техработы {maint_ind}", callback_data="admin:maintenance:toggle")],
             [InlineKeyboardButton(text="🗂 Сервис · бэкап базы", callback_data="admin:settings:service")],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
         ]

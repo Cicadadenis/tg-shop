@@ -5,6 +5,7 @@ import json
 import re
 
 from aiogram import F, Router
+from aiogram.filters import StateFilter
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -49,6 +50,7 @@ from keyboards.inline.shop_inline import (
     product_rating_kb,
     product_survey_kb,
     wishlist_kb,
+    optional_photo_kb,
 )
 from data.config import DEFAULT_SHOP_MENU_CAPTION
 from keyboards.inline.user_inline import main_menu_inline_kb, profile_actions_inline_kb, admin_text_menus_kb, admin_text_menu_actions_kb, admin_text_menu_cancel_kb
@@ -1448,10 +1450,13 @@ async def product_rate(callback: CallbackQuery, state: FSMContext) -> None:
                 pass
         await state.set_state(ReviewTextForm.text)
         await state.update_data(review_order_id=order_id, review_product_id=product_id)
+        skip_review_kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⏭ Пропустить", callback_data="shop:review:skip")]]
+        )
         await callback.message.answer(
-            f"⭐ Оценка <b>{stars}/5</b> сохранена.\n\n"
-            "✏ Напишите короткий отзыв или отправьте «—», чтобы пропустить.",
-            reply_markup=back_menu_kb("menu:orders"),
+            f"⭐️ Оценка <b>{stars}/5</b> сохранена.\n\n"
+            "✏️ Напишите короткий отзыв или жми пропустить.",
+            reply_markup=skip_review_kb,
         )
         await callback.answer("Сохранено")
     else:
@@ -1463,6 +1468,30 @@ async def product_rate(callback: CallbackQuery, state: FSMContext) -> None:
             except Exception:
                 pass
         await callback.answer("Вы уже оценили этот товар", show_alert=True)
+
+
+@router.callback_query(StateFilter(ReviewTextForm.text), F.data == "shop:review:skip")
+async def review_text_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    order_id = str(data.get("review_order_id") or "")
+    product_id = int(data.get("review_product_id") or 0)
+    if not order_id or product_id < 1:
+        await state.clear()
+        await callback.answer()
+        return
+    update_product_rating_comment(order_id, product_id, "")
+    await state.clear()
+    try:
+        await callback.message.edit_text(
+            "<b>✅ Спасибо за оценку!</b>",
+            reply_markup=back_menu_kb("menu:orders"),
+        )
+    except TelegramBadRequest:
+        await callback.message.answer(
+            "<b>✅ Спасибо за оценку!</b>",
+            reply_markup=back_menu_kb("menu:orders"),
+        )
+    await callback.answer()
 
 
 @router.message(ReviewTextForm.text)
@@ -1958,6 +1987,74 @@ async def admin_welcome_start(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("admin:skip:optphoto:"))
+async def admin_optional_photo_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    tag = callback.data.split(":")[-1]
+    mapping = {
+        "welcome": AdminWelcome.photo,
+        "main_menu": AdminMainMenu.photo,
+        "add_product": AdminAddProduct.photo,
+        "text_menu": AdminTextMenu.photo,
+    }
+    if tag not in mapping:
+        await callback.answer()
+        return
+    if await state.get_state() != mapping[tag].state:
+        await callback.answer("Сначала выполните шаг в мастере", show_alert=True)
+        return
+    if tag in ("welcome", "main_menu", "text_menu"):
+        if not _is_privileged(callback.from_user.id):
+            await state.clear()
+            await callback.answer("Недостаточно прав", show_alert=True)
+            return
+    elif tag == "add_product" and not _is_admin(callback.from_user.id):
+        await state.clear()
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    if tag == "welcome":
+        set_welcome_message(data.get("welcome_text", DEFAULT_SHOP_MENU_CAPTION), "")
+        ok_text = "<b>✅ Приветствие сохранено</b>\n──────────────\n<i>Только текст</i>"
+        ok_kb = back_admin_kb("admin:section:appearance")
+    elif tag == "main_menu":
+        set_main_menu_message(data.get("main_menu_text", DEFAULT_SHOP_MENU_CAPTION), "")
+        ok_text = "<b>✅ Главное меню сохранено</b>\n──────────────\n<i>Только текст</i>"
+        ok_kb = back_admin_kb("admin:section:appearance")
+    elif tag == "add_product":
+        from utils.db_api.shop import get_or_create_category
+
+        category_id = get_or_create_category(data.get("category", "Электроника"))
+        product_id = create_product(
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            price=int(data.get("price", 0)),
+            stock=int(data.get("stock", 0)),
+            category_id=category_id,
+            photo="",
+            brand=data.get("brand", ""),
+        )
+        ok_text = f"<b>✅ Товар в каталоге</b>\n──────────────\n🆔 <code>{product_id}</code>"
+        ok_kb = back_admin_kb("admin:product:list")
+    else:
+        menu_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        set_text_menu(
+            menu_id,
+            data.get("menu_name", "Меню"),
+            data.get("menu_text", ""),
+        )
+        ok_text = "<b>✅ Меню сохранено без фото</b>"
+        ok_kb = back_admin_kb("admin:text_menus")
+
+    try:
+        await callback.message.edit_text(ok_text, reply_markup=ok_kb)
+    except TelegramBadRequest:
+        await callback.message.answer(ok_text, reply_markup=ok_kb)
+    await callback.answer()
+
+
 @router.message(AdminWelcome.text)
 async def admin_welcome_text(message: Message, state: FSMContext) -> None:
     if not _is_privileged(message.from_user.id):
@@ -1966,8 +2063,11 @@ async def admin_welcome_text(message: Message, state: FSMContext) -> None:
     await state.update_data(welcome_text=(message.text or "").strip())
     await state.set_state(AdminWelcome.photo)
     await message.answer(
-        "<b>🖼 Картинка к приветствию</b>\n──────────────\n<i>Фото или «-» только текст</i>",
-        reply_markup=back_admin_kb("admin:section:appearance"),
+        "<b>🖼 Картинка к приветствию</b>\n──────────────\n<i>Пришлите фото или жми пропустить — только текст.</i>",
+        reply_markup=optional_photo_kb(
+            skip_callback="admin:skip:optphoto:welcome",
+            back_target="admin:section:appearance",
+        ),
     )
 
 
@@ -1992,8 +2092,11 @@ async def admin_welcome_no_photo(message: Message, state: FSMContext) -> None:
         return
     if (message.text or "").strip() != "-":
         await message.answer(
-            "<b>⚠ Нужно фото или «-»</b>",
-            reply_markup=back_admin_kb("admin:section:appearance"),
+            "<b>⚠ Нужно фото или жми пропустить</b>",
+            reply_markup=optional_photo_kb(
+                skip_callback="admin:skip:optphoto:welcome",
+                back_target="admin:section:appearance",
+            ),
         )
         return
 
@@ -2029,8 +2132,11 @@ async def admin_main_menu_text(message: Message, state: FSMContext) -> None:
     await state.update_data(main_menu_text=(message.text or "").strip())
     await state.set_state(AdminMainMenu.photo)
     await message.answer(
-        "<b>🖼 Картинка к меню</b>\n──────────────\n<i>Фото или «-» только текст</i>",
-        reply_markup=back_admin_kb("admin:section:appearance"),
+        "<b>🖼 Картинка к меню</b>\n──────────────\n<i>Пришлите фото или жми пропустить — только текст.</i>",
+        reply_markup=optional_photo_kb(
+            skip_callback="admin:skip:optphoto:main_menu",
+            back_target="admin:section:appearance",
+        ),
     )
 
 
@@ -2055,8 +2161,11 @@ async def admin_main_menu_no_photo(message: Message, state: FSMContext) -> None:
         return
     if (message.text or "").strip() != "-":
         await message.answer(
-            "<b>⚠ Нужно фото или «-»</b>",
-            reply_markup=back_admin_kb("admin:section:appearance"),
+            "<b>⚠ Нужно фото или жми пропустить</b>",
+            reply_markup=optional_photo_kb(
+                skip_callback="admin:skip:optphoto:main_menu",
+                back_target="admin:section:appearance",
+            ),
         )
         return
 
@@ -2519,8 +2628,11 @@ async def admin_add_stock(message: Message, state: FSMContext) -> None:
     await state.update_data(stock=int(message.text))
     await state.set_state(AdminAddProduct.photo)
     await message.answer(
-        "<b>🖼 Фото</b>\n──────────────\n<i>Или «-» без изображения</i>",
-        reply_markup=back_admin_kb("admin:section:catalog"),
+        "<b>🖼 Фото</b>\n──────────────\n<i>Пришлите фото или жми пропустить — без изображения.</i>",
+        reply_markup=optional_photo_kb(
+            skip_callback="admin:skip:optphoto:add_product",
+            back_target="admin:section:catalog",
+        ),
     )
 
 
@@ -2550,8 +2662,11 @@ async def admin_add_photo(message: Message, state: FSMContext) -> None:
 async def admin_add_no_photo(message: Message, state: FSMContext) -> None:
     if (message.text or "").strip() != "-":
         await message.answer(
-            "<b>⚠ Нужно фото или «-»</b>",
-            reply_markup=back_admin_kb("admin:section:catalog"),
+            "<b>⚠ Нужно фото или жми пропустить</b>",
+            reply_markup=optional_photo_kb(
+                skip_callback="admin:skip:optphoto:add_product",
+                back_target="admin:section:catalog",
+            ),
         )
         return
 
@@ -3842,8 +3957,11 @@ async def admin_text_menu_text(message: Message, state: FSMContext) -> None:
     await state.update_data(menu_text=menu_text)
     await state.set_state(AdminTextMenu.photo)
     await message.answer(
-        "<b>🖼 Фото (опционально)</b>\n──────────────\n<i>Отправьте фото или напишите «-» для пропуска</i>",
-        reply_markup=admin_text_menu_cancel_kb(),
+        "<b>🖼 Фото (опционально)</b>\n──────────────\n<i>Пришлите фото или жми пропустить.</i>",
+        reply_markup=optional_photo_kb(
+            skip_callback="admin:skip:optphoto:text_menu",
+            back_target="admin:text_menus",
+        ),
     )
 
 
@@ -3878,8 +3996,11 @@ async def admin_text_menu_no_photo(message: Message, state: FSMContext) -> None:
     
     if (message.text or "").strip() != "-":
         await message.answer(
-            "<b>⚠ Отправьте фото или напишите «-»</b>",
-            reply_markup=admin_text_menu_cancel_kb(),
+            "<b>⚠ Пришлите фото или жми пропустить</b>",
+            reply_markup=optional_photo_kb(
+                skip_callback="admin:skip:optphoto:text_menu",
+                back_target="admin:text_menus",
+            ),
         )
         return
     

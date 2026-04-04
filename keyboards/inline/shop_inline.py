@@ -22,6 +22,16 @@ def back_admin_kb(target: str = "admin:shop") -> InlineKeyboardMarkup:
     )
 
 
+def optional_photo_kb(*, skip_callback: str, back_target: str = "admin:shop") -> InlineKeyboardMarkup:
+    """Опциональное фото: кнопка «Пропустить» и «Назад»."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Пропустить", callback_data=skip_callback)],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data=back_target)],
+        ]
+    )
+
+
 def categories_kb(categories: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     pair: list[InlineKeyboardButton] = []
@@ -256,12 +266,12 @@ def admin_section_catalog_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="➕ Товар · новая позиция", callback_data="admin:product:add"),
-                InlineKeyboardButton(text="📦 Список · редактирование", callback_data="admin:product:list"),
+                InlineKeyboardButton(text="➕ Добавить Товар", callback_data="admin:product:add"),
+                InlineKeyboardButton(text="📦 Редак. Товара", callback_data="admin:product:list"),
             ],
             [
                 InlineKeyboardButton(text="🧾 Заказы · статусы", callback_data="admin:orders"),
-                InlineKeyboardButton(text="🗂 Категории · структура", callback_data="admin:categories"),
+                InlineKeyboardButton(text="🗂 Категории", callback_data="admin:categories"),
             ],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")],
         ]
@@ -295,7 +305,7 @@ def admin_section_insights_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📊 Сводка · 7 дней", callback_data="admin:analytics"),
             ],
             [
-                InlineKeyboardButton(text="📈 Статистика · периоды", callback_data="admin:stats"),
+                InlineKeyboardButton(text="📈 Статистика", callback_data="admin:stats"),
                 InlineKeyboardButton(text="👥 Клиенты · база", callback_data="admin:users:list:insights"),
             ],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
@@ -310,8 +320,8 @@ def admin_section_io_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📥 CSV · заказы для Excel", callback_data="admin:orders:export"),
             ],
             [
-                InlineKeyboardButton(text="📤 JSON · выгрузка каталога", callback_data="admin:catalog:export"),
-                InlineKeyboardButton(text="📥 JSON · загрузка каталога", callback_data="admin:catalog:import"),
+                InlineKeyboardButton(text="📤 Выгрузка каталога", callback_data="admin:catalog:export"),
+                InlineKeyboardButton(text="📥 Загрузка каталога", callback_data="admin:catalog:import"),
             ],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")],
         ]
@@ -321,8 +331,8 @@ def admin_section_io_kb() -> InlineKeyboardMarkup:
 def admin_section_team_kb(*, can_manage_admins: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(text="📢 Рассылка · всем клиентам", callback_data="admin:broadcast"),
-            InlineKeyboardButton(text="🏷 Промокоды · скидки", callback_data="admin:promos"),
+            InlineKeyboardButton(text="📢 Рассылка · всем", callback_data="admin:broadcast"),
+            InlineKeyboardButton(text="🏷 Промокоды", callback_data="admin:promos"),
         ],
         [InlineKeyboardButton(text="🛡 Админы · менеджеры", callback_data="admin:admins:list")],
     ]
