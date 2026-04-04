@@ -4,6 +4,7 @@ import asyncio
 from handlers import router
 from loader import bot, dispatcher
 from utils.db_api.sqlite import create_bdx
+from utils.cart_reminders import cart_abandon_reminder_loop
 from utils.db_api.shop import delete_old_closed_tickets
 from utils.other_func import on_startup_notify
 from utils.set_bot_commands import set_default_commands
@@ -32,6 +33,7 @@ async def main() -> None:
     dispatcher.include_router(router)
     await on_startup()
     asyncio.create_task(_cleanup_loop())
+    asyncio.create_task(cart_abandon_reminder_loop(bot))
     await dispatcher.start_polling(bot)
 
 

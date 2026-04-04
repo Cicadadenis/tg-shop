@@ -6,6 +6,16 @@ import requests
 
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# Дефолтная витрина бота: подпись и файл баннера (если в БД нет своего фото)
+DEFAULT_SHOP_MENU_CAPTION = "ㅤㅤㅤㅤ🔥 ⛧ 𝕊𝔸𝕋𝔸𝕟𝔸 𝕊𝕙𝕠𝕡 ⛧ 🔥"
+DEFAULT_MENU_BANNER_PATH = os.path.join(BASE_DIR, "assets", "default_menu_banner.png")
+
+
+def get_default_menu_banner_path() -> str | None:
+    if os.path.isfile(DEFAULT_MENU_BANNER_PATH):
+        return DEFAULT_MENU_BANNER_PATH
+    return None
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 SETTINGS_PATH = os.path.join(BASE_DIR, "settings.ini")
 

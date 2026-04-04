@@ -13,6 +13,7 @@ class AdminAddProduct(StatesGroup):
 class AdminEditProduct(StatesGroup):
     price = State()
     stock = State()
+    description = State()
     photo = State()
 
 
@@ -74,6 +75,11 @@ class AdminNotifications(StatesGroup):
     user_status_template = State()
     notify_chat_id = State()
     start_command_description = State()
+
+
+class AdminBusinessHours(StatesGroup):
+    start_time = State()
+    end_time = State()
 
 
 class AdminUsers(StatesGroup):

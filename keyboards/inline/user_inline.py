@@ -5,28 +5,28 @@ def main_menu_inline_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     if is_admin:
         rows = [
             [
-                InlineKeyboardButton(text="🗂 Каталог", callback_data="menu:catalog"),
-                InlineKeyboardButton(text="🪺 Корзина", callback_data="menu:cart"),
+                InlineKeyboardButton(text="📂 Каталог", callback_data="menu:catalog"),
+                InlineKeyboardButton(text="🧺 Корзина", callback_data="menu:cart"),
             ],
             [
                 InlineKeyboardButton(text="📦 Заказы", callback_data="menu:orders"),
                 InlineKeyboardButton(text="📱 Профиль", callback_data="menu:profile"),
             ],
-            [InlineKeyboardButton(text="⚙ Админ меню", callback_data="menu:admin")],
+            [InlineKeyboardButton(text="⚙️ Админ меню", callback_data="menu:admin")],
         ]
     else:
         rows = [
             [
-                InlineKeyboardButton(text="🗂 Каталог", callback_data="menu:catalog"),
-                InlineKeyboardButton(text="🪺 Корзина", callback_data="menu:cart"),
+                InlineKeyboardButton(text="📂 Каталог", callback_data="menu:catalog"),
+                InlineKeyboardButton(text="🧺 Корзина", callback_data="menu:cart"),
             ],
             [
                 InlineKeyboardButton(text="📦 Заказы", callback_data="menu:orders"),
-                InlineKeyboardButton(text="❤️ Избранное", callback_data="menu:wishlist"),
+                InlineKeyboardButton(text="📱 Профиль", callback_data="menu:profile"),
             ],
             [
-                InlineKeyboardButton(text="📱 Профиль", callback_data="menu:profile"),
-                InlineKeyboardButton(text="🛞 Тех. поддержка", callback_data="menu:support"),
+                InlineKeyboardButton(text="❤️ Избранное", callback_data="menu:wishlist"),
+                InlineKeyboardButton(text="💬 Поддержка", callback_data="menu:support"),
             ],
         ]
 
@@ -44,17 +44,17 @@ def account_categories_inline_kb(categories: list[tuple]) -> InlineKeyboardMarku
 
 profile_actions_inline_kb = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text="📦 Мои заказы", callback_data="menu:orders")],
-        [InlineKeyboardButton(text="✏ Изменить данные", callback_data="profile:edit")],
-        [InlineKeyboardButton(text="⬅ В меню", callback_data="profile:back")],
+        [InlineKeyboardButton(text="📦 Заказы · история покупок", callback_data="menu:orders")],
+        [InlineKeyboardButton(text="✏ Данные · ФИО и адрес", callback_data="profile:edit")],
+        [InlineKeyboardButton(text="⬅ В меню · главный экран", callback_data="profile:back")],
     ]
 )
 
 
 support_menu_inline_kb = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Написать в поддержку", callback_data="support:start")],
-        [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:main")],
+        [InlineKeyboardButton(text="✍️ Написать · новое обращение", callback_data="support:start")],
+        [InlineKeyboardButton(text="⬅ В меню · назад", callback_data="menu:main")],
     ]
 )
 
@@ -68,10 +68,10 @@ admin_reply_cancel_kb = InlineKeyboardMarkup(
 )
 
 
-def admin_menu_inline_kb(maintenance_enabled: bool = False, *, full_access: bool = True) -> InlineKeyboardMarkup:
+def admin_menu_inline_kb(*, full_access: bool = True) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="🛒 Управление магазином", callback_data="admin:shop")],
-        [InlineKeyboardButton(text="📊 Информация и статистика", callback_data="admin:section:insights")],
+        [InlineKeyboardButton(text="🛒 Магазин · каталог · заказы · админка", callback_data="admin:shop")],
+        [InlineKeyboardButton(text="📊 Сводка · бот · клиенты · метрики", callback_data="admin:section:insights")],
     ]
     rows.extend(
         [
@@ -118,13 +118,29 @@ def admin_settings_inline_kb(
     googlepay_enabled: bool = False,
     *,
     client_status_notif: bool = True,
+    maintenance_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
+    maint_ind = "🟢 ВКЛ" if maintenance_enabled else "🔴 ВЫКЛ"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🎨 Оформление магазина", callback_data="admin:section:appearance")],
-            [InlineKeyboardButton(text="🔔 Шаблоны и уведомления", callback_data="admin:settings:notif")],
-            [InlineKeyboardButton(text="🗂 Сервис", callback_data="admin:settings:service")],
+            [InlineKeyboardButton(text="🎨 Витрина · /start · главное меню", callback_data="admin:section:appearance")],
+            [InlineKeyboardButton(text="🔔 Шаблоны · статусы · лог-чат", callback_data="admin:settings:notif")],
+            [InlineKeyboardButton(text="🕐 Время работы · поддержка и доставка по городу", callback_data="admin:settings:business_hours")],
+            [InlineKeyboardButton(text=f"🛠 Техработы магазина · для клиентов {maint_ind}", callback_data="admin:maintenance:toggle")],
+            [InlineKeyboardButton(text="🗂 Сервис · бэкап базы", callback_data="admin:settings:service")],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
+        ]
+    )
+
+
+def admin_business_hours_kb(*, enabled: bool) -> InlineKeyboardMarkup:
+    ind = "🟢" if enabled else "🔴"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{ind} Ограничение по времени", callback_data="admin:bhours:toggle")],
+            [InlineKeyboardButton(text="🕐 Начало приёма", callback_data="admin:bhours:start")],
+            [InlineKeyboardButton(text="🕙 Конец приёма", callback_data="admin:bhours:end")],
+            [InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")],
         ]
     )
 
@@ -133,12 +149,12 @@ def admin_settings_notifications_inline_kb(*, client_status_notif: bool = True) 
     status_indicator = "🟢" if client_status_notif else "🔴"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔔 Шаблон: новый заказ", callback_data="admin:notif:new")],
-            [InlineKeyboardButton(text="📦 Шаблон: статус клиенту", callback_data="admin:notif:status")],
-            [InlineKeyboardButton(text="✏️ Текст команды /start", callback_data="admin:notif:start_cmd")],
-            [InlineKeyboardButton(text=f"📬 Отправка статуса клиенту {status_indicator}", callback_data="admin:notif:client_toggle")],
-            [InlineKeyboardButton(text="📢 Лог-чат заказов", callback_data="admin:notif:chat")],
-            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:settings")],
+            [InlineKeyboardButton(text="🔔 Админу · текст нового заказа", callback_data="admin:notif:new")],
+            [InlineKeyboardButton(text="📦 Клиенту · шаблон статуса", callback_data="admin:notif:status")],
+            [InlineKeyboardButton(text="✏️ Меню Telegram · описание /start", callback_data="admin:notif:start_cmd")],
+            [InlineKeyboardButton(text=f"📬 Авто-статус клиенту {status_indicator}", callback_data="admin:notif:client_toggle")],
+            [InlineKeyboardButton(text="📢 Лог-чат · дубли заказов", callback_data="admin:notif:chat")],
+            [InlineKeyboardButton(text="⬅ Назад · все настройки", callback_data="admin:settings")],
         ]
     )
 
@@ -167,8 +183,8 @@ def admin_settings_payments_inline_kb(
 def admin_settings_service_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🗂 Бэкап БД", callback_data="admin:db:backup")],
-            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:settings")],
+            [InlineKeyboardButton(text="💾 Бэкап · скачать SQLite", callback_data="admin:db:backup")],
+            [InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")],
         ]
     )
 

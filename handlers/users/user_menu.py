@@ -9,8 +9,9 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from data.config import adm, bot_description
+from data.config import adm, bot_description, get_default_menu_banner_path, username as bot_username
 from keyboards.inline.user_inline import (
+    admin_business_hours_kb,
     admin_settings_inline_kb,
     admin_settings_notifications_inline_kb,
     admin_settings_payments_inline_kb,
@@ -24,16 +25,17 @@ from keyboards.inline.user_inline import (
     support_tickets_list_kb,
     support_ticket_view_kb,
 )
-from handlers.users.shop_state import AdminNotifications, AdminPayments, SupportDialog
+from handlers.users.shop_state import AdminBusinessHours, AdminNotifications, AdminPayments, SupportDialog
 from utils.set_bot_commands import set_default_commands
 from utils.db_api.shop import get_user_profile as get_shop_user_profile
-from utils.db_api.shop import ensure_user
+from utils.db_api.shop import apply_referral_from_start_payload, ensure_user, get_or_create_referral_code
 from utils.db_api.shop import (
     get_admin_ids,
     get_admin_new_order_template,
     get_notify_chat_id,
     get_payment_info,
     get_support_admin_ids,
+    get_shop_setting,
     get_shop_stats,
     get_start_command_description,
     get_user_status_template,
@@ -45,6 +47,7 @@ from utils.db_api.shop import (
     is_owner_user,
     is_privileged_admin,
     is_support_admin,
+    toggle_maintenance,
     is_user_status_notification_enabled,
     set_user_status_notification_enabled,
     create_support_ticket,
@@ -58,9 +61,16 @@ from utils.db_api.shop import (
     set_payment_setting,
     set_start_command_description,
     set_user_status_template,
+    business_hours_hint_html,
+    get_business_hours_bounds,
+    is_business_hours_restriction_enabled,
+    is_within_business_hours,
+    set_business_hours_enabled,
+    set_business_hours_time,
 )
 from utils.db_api.sqlite import get_all_categoriesx, get_userx
 from utils.db_api.sqlite import path_to_db
+from utils.ui_sections import ui_panel, ui_screen
 
 router = Router(name="user_menu")
 # Compatibility export for legacy imports expecting `dp` symbol.
@@ -73,7 +83,6 @@ def _is_admin(user_id: int) -> bool:
 
 def _get_admin_menu_kb(viewer_id: int) -> InlineKeyboardMarkup:
     return admin_menu_inline_kb(
-        maintenance_enabled=is_maintenance(),
         full_access=is_privileged_admin(viewer_id),
     )
 
@@ -85,6 +94,7 @@ def _get_admin_settings_kb() -> InlineKeyboardMarkup:
         applepay_enabled=bool(get_payment_info("applepay")),
         googlepay_enabled=bool(get_payment_info("googlepay")),
         client_status_notif=is_user_status_notification_enabled(),
+        maintenance_enabled=is_maintenance(),
     )
 
 
@@ -107,25 +117,51 @@ def _get_admin_settings_service_kb() -> InlineKeyboardMarkup:
     return admin_settings_service_inline_kb()
 
 
+def _admin_business_hours_text() -> str:
+    en = is_business_hours_restriction_enabled()
+    hs, he = get_business_hours_bounds()
+    st = "🟢 включено" if en else "🔴 выключено"
+    return ui_panel(
+        emoji="🕐",
+        title="Время работы",
+        intro="Эти часы действуют для приёма обращений в поддержку и для выбора доставки по городу при оформлении заказа.",
+        body_lines=[
+            f"📌 <b>Ограничение:</b> {st}",
+            f"   ⤷ интервал: <b>{hs}</b> — <b>{he}</b>",
+            "   ⤷ ориентир: часы сервера, на котором запущен бот",
+            "",
+            "🧭 <i>Ночная смена: задайте начало позже конца (например 22:00 и 06:00).</i>",
+        ],
+    )
+
+
 def _admin_settings_text() -> str:
     chat_id = get_notify_chat_id() or "не задан"
     st = "✅ включены" if is_user_status_notification_enabled() else "❌ выключены"
+    maint = "🛠 <b>включены</b> (клиенты не в магазин)" if is_maintenance() else "✅ выключены"
     start_cmd = get_start_command_description()
-    return (
-        "⚙️ <b>Настройки</b>\n"
-        "──────────────\n"
-        "<i>Оформление, уведомления и сервисные инструменты</i>\n\n"
-        "<b>Текущие параметры</b>\n"
-        f"📬 Авто-уведомления: <b>{st}</b>\n"
-        f"⌨️ Команда /start: <b>{start_cmd}</b>\n"
-        f"📢 Лог-чат заказов: <code>{chat_id}</code>\n\n"
-        "<b>Разделы ниже</b>\n"
-        "🎨 Оформление магазина\n"
-        "🔔 Шаблоны и уведомления\n"
-        "🗂 Сервис\n\n"
-        "<b>Плейсхолдеры шаблонов</b>\n"
-        "<code>{order_id}</code> <code>{status}</code> <code>{name}</code>\n"
-        "<code>{phone}</code> <code>{total}</code> <code>{delivery}</code> <code>{payment}</code>"
+    return ui_panel(
+        emoji="⚙️",
+        title="Настройки",
+        intro="Витрина, уведомления и служебные инструменты — всё, что не требует ежедневного редактирования каталога.",
+        body_lines=[
+            "📌 <b>Сейчас в системе</b>",
+            f"   ⤷ 🛠 техработы магазина: {maint}",
+            f"   ⤷ 📬 авто-статус клиенту: <b>{st}</b>",
+            f"   ⤷ ⌨️ меню /start: <b>{start_cmd}</b>",
+            f"   ⤷ 📢 лог-чат заказов: <code>{chat_id}</code>",
+            "",
+            "🧭 <b>Разделы ниже</b>",
+            "   ⤷ 🎨 <b>Оформление</b> · приветствие и главное меню",
+            "   ⤷ 🔔 <b>Шаблоны</b> · тексты уведомлений и каналы",
+            "   ⤷ 🕐 <b>Время работы</b> · поддержка и доставка по городу",
+            "   ⤷ 🛠 <b>Техработы</b> · витрина недоступна клиентам (админы ходят как обычно)",
+            "   ⤷ 🗂 <b>Сервис</b> · резервная копия базы",
+            "",
+            "📝 <b>Плейсхолдеры</b> <i>(для шаблонов заказов)</i>",
+            "<code>{order_id}</code> <code>{status}</code> <code>{name}</code>",
+            "<code>{phone}</code> <code>{total}</code> <code>{delivery}</code> <code>{payment}</code>",
+        ],
     )
 
 
@@ -133,16 +169,27 @@ def _admin_settings_notifications_text() -> str:
     chat_id = get_notify_chat_id() or "не задан"
     st = "✅ включены" if is_user_status_notification_enabled() else "❌ выключены"
     start_cmd = get_start_command_description()
-    return (
-        "🔔 <b>Шаблоны и уведомления</b>\n"
-        "──────────────\n"
-        "<i>Уведомления клиентам и служебные шаблоны</i>\n\n"
-        f"📬 Авто-уведомления: <b>{st}</b>\n"
-        f"📢 Лог-чат заказов: <code>{chat_id}</code>\n"
-        f"⌨️ Команда /start: <b>{start_cmd}</b>\n\n"
-        "📝 <b>Плейсхолдеры шаблонов</b>\n"
-        "<code>{order_id}</code> <code>{status}</code> <code>{name}</code>\n"
-        "<code>{phone}</code> <code>{total}</code> <code>{delivery}</code> <code>{payment}</code>"
+    return ui_panel(
+        emoji="🔔",
+        title="Шаблоны и уведомления",
+        intro="Тексты для админов и клиентов, плюс куда дублировать заказы.",
+        body_lines=[
+            "📌 <b>Текущие значения</b>",
+            f"   ⤷ 📬 авто-статус клиенту: <b>{st}</b>",
+            f"   ⤷ 📢 лог-чат: <code>{chat_id}</code>",
+            f"   ⤷ ⌨️ описание /start: <b>{start_cmd}</b>",
+            "",
+            "🧭 <b>Кнопки этого экрана</b>",
+            "   ⤷ 🔔 шаблон «новый заказ» для админов",
+            "   ⤷ 📦 шаблон «статус» для покупателя",
+            "   ⤷ ✏️ текст пункта /start в меню бота",
+            "   ⤷ 📬 мастер-переключатель авто-статусов",
+            "   ⤷ 📢 привязка лог-чата по chat_id",
+            "",
+            "📝 <b>Плейсхолдеры</b>",
+            "<code>{order_id}</code> <code>{status}</code> <code>{name}</code>",
+            "<code>{phone}</code> <code>{total}</code> <code>{delivery}</code> <code>{payment}</code>",
+        ],
     )
 
 
@@ -151,14 +198,19 @@ def _admin_settings_payments_text() -> str:
     card = "✅ настроена" if get_payment_info("card") else "➖ не настроена"
     apple = "✅ настроен" if get_payment_info("applepay") else "➖ не настроен"
     google = "✅ настроен" if get_payment_info("googlepay") else "➖ не настроен"
-    return (
-        "💳 <b>Настройки оплаты</b>\n"
-        "──────────────\n"
-        "<i>Реквизиты и доступные способы оплаты</i>\n\n"
-        f"🚚 Наложенный платёж: <b>{cod}</b>\n"
-        f"💳 Карта: <b>{card}</b>\n"
-        f"🍏 Apple Pay: <b>{apple}</b>\n"
-        f"🤖 Google Pay: <b>{google}</b>"
+    return ui_panel(
+        emoji="💳",
+        title="Настройки оплаты",
+        intro="Включите методы и заполните реквизиты — клиент увидит их на шаге оплаты.",
+        body_lines=[
+            "📌 <b>Состояние методов</b>",
+            f"   ⤷ 🚚 наложенный платёж: <b>{cod}</b>",
+            f"   ⤷ 💳 банковская карта: <b>{card}</b>",
+            f"   ⤷ 🍏 Apple Pay: <b>{apple}</b>",
+            f"   ⤷ 🤖 Google Pay: <b>{google}</b>",
+            "",
+            "💡 <i>Строки с индикатором 🟢/🔴 ниже переключают доступность у клиента.</i>",
+        ],
     )
 
 
@@ -194,45 +246,68 @@ async def _clear_recent_private_chat(message: Message, limit: int = 40) -> None:
 @router.message(F.text == "⬅ На главную")
 async def open_main_menu(message: Message, state: FSMContext) -> None:
     await state.clear()
+    parts = (message.text or "").split(maxsplit=1)
+    start_arg = parts[1].strip() if len(parts) > 1 else ""
+    display_name = message.from_user.first_name or message.from_user.username or str(message.from_user.id)
+    ensure_user(message.from_user.id, display_name)
+    apply_referral_from_start_payload(message.from_user.id, start_arg)
+    if get_shop_setting("referral_program_enabled", "1") == "1":
+        get_or_create_referral_code(message.from_user.id)
     if (message.text or "").startswith("/start"):
         await _clear_recent_private_chat(message)
     welcome_text, welcome_photo = get_welcome_message()
     if is_maintenance() and not _is_admin(message.from_user.id):
         welcome_text = f"{welcome_text}\n\n<b>🛠 Магазин временно на техработах</b>"
 
+    kb = main_menu_inline_kb(is_admin=_is_admin(message.from_user.id))
+    banner_local = get_default_menu_banner_path()
     if welcome_photo:
         await message.answer_photo(
             welcome_photo,
             caption=welcome_text,
-            reply_markup=main_menu_inline_kb(is_admin=_is_admin(message.from_user.id)),
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    elif banner_local:
+        await message.answer_photo(
+            FSInputFile(banner_local),
+            caption=welcome_text,
+            reply_markup=kb,
+            parse_mode="HTML",
         )
     else:
-        await message.answer(
-            welcome_text,
-            reply_markup=main_menu_inline_kb(is_admin=_is_admin(message.from_user.id)),
-        )
+        await message.answer(welcome_text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "menu:main")
 async def callback_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    if get_shop_setting("referral_program_enabled", "1") == "1":
+        get_or_create_referral_code(callback.from_user.id)
     main_menu_text, main_menu_photo = get_main_menu_message()
-    
+    kb = main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id))
+    banner_local = get_default_menu_banner_path()
+
     if main_menu_photo:
         await callback.message.delete()
         await callback.bot.send_photo(
             chat_id=callback.from_user.id,
             photo=main_menu_photo,
             caption=main_menu_text,
-            reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    elif banner_local:
+        await callback.message.delete()
+        await callback.bot.send_photo(
+            chat_id=callback.from_user.id,
+            photo=FSInputFile(banner_local),
+            caption=main_menu_text,
+            reply_markup=kb,
             parse_mode="HTML",
         )
     else:
-        await _safe_edit(
-            callback.message,
-            main_menu_text,
-            reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
-        )
+        await _safe_edit(callback.message, main_menu_text, reply_markup=kb)
     await callback.answer()
 
 
@@ -240,9 +315,12 @@ async def callback_main_menu(callback: CallbackQuery, state: FSMContext) -> None
 async def callback_accounts(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback.message,
-        "<b>🛍 Каталог</b>\n"
-        "──────────────\n"
-        "<i>Откройте раздел каталога, чтобы посмотреть товары и категории.</i>",
+        ui_panel(
+            emoji="🛍",
+            title="Каталог",
+            intro="Полный список категорий и поиск по витрине — в разделе «Каталог» главного меню.",
+            body_lines=["🧭 <i>Нажмите «Каталог» на клавиатуре ниже, чтобы продолжить.</i>"],
+        ),
         reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
     )
     await callback.answer()
@@ -261,10 +339,15 @@ async def callback_category_selected(callback: CallbackQuery) -> None:
 
     await _safe_edit(
         callback.message,
-        f"<b>📂 Категория</b>\n"
-        "──────────────\n"
-        f"<b>{category_name}</b>\n\n"
-        "<i>Детальная выдача по этой категории будет подключена в следующем обновлении.</i>",
+        ui_panel(
+            emoji="📂",
+            title="Категория",
+            intro=f"Вы выбрали раздел «{category_name}».",
+            body_lines=[
+                "📋 <i>Список товаров этой категории открывается из основного каталога магазина.</i>",
+                "🗂 <i>Нажмите «Каталог» ниже и выберите ту же категорию в боте магазина.</i>",
+            ],
+        ),
         reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
     )
     await callback.answer()
@@ -277,6 +360,10 @@ async def callback_profile(callback: CallbackQuery) -> None:
         callback.from_user.first_name or callback.from_user.username or str(callback.from_user.id),
     )
     profile = get_shop_user_profile(callback.from_user.id)
+    ref_enabled = get_shop_setting("referral_program_enabled", "1") == "1"
+    ref_code = get_or_create_referral_code(callback.from_user.id) if ref_enabled else ""
+    uname = (bot_username or "").strip().lstrip("@")
+    ref_link = f"https://t.me/{uname}?start=ref_{ref_code}" if ref_code and uname else ""
     user = get_userx(user_id=callback.from_user.id)
     username = callback.from_user.first_name or callback.from_user.username or "не указан"
     full_name = (profile.get("name") or "").strip() or "не заполнено"
@@ -284,17 +371,38 @@ async def callback_profile(callback: CallbackQuery) -> None:
     phone = profile["phone"] if profile["phone"] else "не указан"
     address = profile["address"] if profile["address"] else "не указан"
     bonus = profile.get("bonus", 0)
-    bonus_line = f"🎁 Бонус: <b>{bonus} грн</b>\n" if bonus > 0 else ""
-    profile_text = (
-        "<b>👤 Личный кабинет</b>\n"
-        "──────────────\n"
-        f"🆔 ID: <code>{callback.from_user.id}</code>\n"
-        f"🔖 Имя в Telegram: <b>{username}</b>\n"
-        f"🙍 ФИО: <b>{full_name}</b>\n"
-        f"📞 Телефон: <b>{phone}</b>\n"
-        f"📍 Адрес: <b>{address}</b>\n"
-        f"{bonus_line}"
-        f"📅 Регистрация: <b>{reg_date}</b>"
+    bonus_block = (
+        [f"   ⤷ 🎁 бонусный счёт: <b>{bonus} грн</b>"]
+        if bonus > 0
+        else ["   ⤷ 🎁 бонусный счёт: <i>пока нет начислений</i>"]
+    )
+    ref_lines: list[str] = []
+    if ref_enabled and ref_code:
+        ref_lines = [
+            "",
+            "🤝 <b>Пригласи друга</b>",
+            f"   ⤷ код: <code>{ref_code}</code>",
+        ]
+        if ref_link:
+            ref_lines.append(f"   ⤷ ссылка: {ref_link}")
+        ref_lines.append(
+            "   ⤷ <i>после первого заказа друга — бонусы вам обоим (если программа включена)</i>"
+        )
+    profile_text = ui_panel(
+        emoji="👤",
+        title="Личный кабинет",
+        intro="Данные для доставки и связи используются при оформлении заказа.",
+        body_lines=[
+            "📌 <b>Ваш профиль</b>",
+            f"   ⤷ 🆔 Telegram ID: <code>{callback.from_user.id}</code>",
+            f"   ⤷ 🔖 имя в Telegram: <b>{username}</b>",
+            f"   ⤷ 🙍 ФИО: <b>{full_name}</b>",
+            f"   ⤷ 📞 телефон: <b>{phone}</b>",
+            f"   ⤷ 📍 адрес: <b>{address}</b>",
+            *bonus_block,
+            f"   ⤷ 📅 регистрация: <b>{reg_date}</b>",
+            *ref_lines,
+        ],
     )
 
     await _safe_edit(
@@ -332,33 +440,48 @@ async def callback_profile_purchases(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "profile:back")
 async def callback_profile_back(callback: CallbackQuery) -> None:
     main_menu_text, main_menu_photo = get_main_menu_message()
-    
+    kb = main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id))
+    banner_local = get_default_menu_banner_path()
+
     if main_menu_photo:
         await callback.message.delete()
         await callback.bot.send_photo(
             chat_id=callback.from_user.id,
             photo=main_menu_photo,
             caption=main_menu_text,
-            reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    elif banner_local:
+        await callback.message.delete()
+        await callback.bot.send_photo(
+            chat_id=callback.from_user.id,
+            photo=FSInputFile(banner_local),
+            caption=main_menu_text,
+            reply_markup=kb,
             parse_mode="HTML",
         )
     else:
-        await _safe_edit(
-            callback.message,
-            main_menu_text,
-            reply_markup=main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id)),
-        )
+        await _safe_edit(callback.message, main_menu_text, reply_markup=kb)
     await callback.answer()
 
 
 @router.callback_query(F.data == "menu:support")
 async def callback_support_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    closed = ""
+    if is_business_hours_restriction_enabled() and not is_within_business_hours():
+        closed = (
+            "\n\n⚠️ <b>Сейчас нерабочее время</b>\n"
+            f"<i>{business_hours_hint_html()}</i>\n"
+            "<i>Новые обращения временно не принимаются.</i>"
+        )
     await _safe_edit(
         callback.message,
         "<b>🛟 Поддержка</b>\n"
         "──────────────\n"
-        "<i>Вопрос по заказу, оплате или работе бота? Напишите нам, и мы ответим в ближайшее время.</i>",
+        "<i>Вопрос по заказу, оплате или работе бота? Напишите нам, и мы ответим в ближайшее время.</i>"
+        f"{closed}",
         reply_markup=support_menu_inline_kb,
     )
     await callback.answer()
@@ -366,6 +489,12 @@ async def callback_support_menu(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.callback_query(F.data == "support:start")
 async def callback_support_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if is_business_hours_restriction_enabled() and not is_within_business_hours():
+        await callback.answer(
+            f"Сейчас нерабочее время. {get_business_hours_bounds()[0]}–{get_business_hours_bounds()[1]} (время сервера бота).",
+            show_alert=True,
+        )
+        return
     await state.set_state(SupportDialog.user_message)
     await _safe_edit(
         callback.message,
@@ -379,6 +508,16 @@ async def callback_support_start(callback: CallbackQuery, state: FSMContext) -> 
 
 @router.message(SupportDialog.user_message)
 async def support_user_message_send(message: Message, state: FSMContext) -> None:
+    if is_business_hours_restriction_enabled() and not is_within_business_hours():
+        await state.clear()
+        hs, he = get_business_hours_bounds()
+        await message.answer(
+            "<b>🕐 Нерабочее время</b>\n──────────────\n"
+            f"<i>Приём обращений с {hs} до {he} (время сервера бота).</i>",
+            reply_markup=support_menu_inline_kb,
+        )
+        return
+
     text_body = (message.text or message.caption or "").strip()
     has_photo = bool(message.photo)
     has_document = bool(message.document)
@@ -729,7 +868,16 @@ async def callback_admin_menu(callback: CallbackQuery) -> None:
 
     await _safe_edit(
         callback.message,
-        "🔧 <b>Панель администратора</b>\n──────────────\n<i>Выберите нужный раздел управления</i>",
+        ui_screen(
+            emoji="🔧",
+            title="Панель администратора",
+            intro="Центр управления магазином: витрина, цифры и глобальные настройки.",
+            groups=[
+                ("🛒", "Управление магазином", "Каталог, заказы, доставка, промо и команда"),
+                ("📊", "Информация и статистика", "О боте, сводки и список клиентов"),
+                ("⚙️", "Настройки", "Оформление, шаблоны, оплата и бэкап"),
+            ],
+        ),
         reply_markup=_get_admin_menu_kb(callback.from_user.id),
     )
     await callback.answer()
@@ -742,24 +890,31 @@ async def callback_admin_bot_info(callback: CallbackQuery) -> None:
         return
 
     stats = get_shop_stats()
-    text = (
-        "<b>📰 О боте</b>\n"
-        "──────────────\n"
-        "<b>Система</b>\n"
-        f"🤖 ID бота: <code>{callback.bot.id}</code>\n"
-        f"👤 Ваш ID: <code>{callback.from_user.id}</code>\n\n"
-        "<b>Магазин</b>\n"
-        f"👥 Клиентов: <b>{stats['customers']}</b>\n"
-        f"⚙️ Администраторов: <b>{stats['admins']}</b>\n\n"
-        "<b>Каталог</b>\n"
-        f"📁 Категорий: <b>{stats['categories']}</b>\n"
-        f"📦 Товаров: <b>{stats['products']}</b>\n\n"
-        "<b>Заказы</b>\n"
-        f"🆕 Новых: <b>{stats['orders_new']}</b>\n"
-        f"⚡ В работе: <b>{stats['orders_inwork']}</b>\n"
-        f"📂 В архиве: <b>{stats['orders_archive']}</b>\n"
-        f"📊 Всего: <b>{stats['orders']}</b>\n\n"
-        f"💰 Выручка: <b>{stats['revenue']:,}</b> грн"
+    text = ui_panel(
+        emoji="📰",
+        title="О боте",
+        intro="Сводная карточка экземпляра бота и ключевые показатели магазина.",
+        body_lines=[
+            "🖥 <b>Система</b>",
+            f"   ⤷ 🤖 ID бота: <code>{callback.bot.id}</code>",
+            f"   ⤷ 👤 ваш Telegram ID: <code>{callback.from_user.id}</code>",
+            "",
+            "🛍 <b>Магазин</b>",
+            f"   ⤷ 👥 клиентов: <b>{stats['customers']}</b>",
+            f"   ⤷ ⚙️ администраторов: <b>{stats['admins']}</b>",
+            "",
+            "📚 <b>Каталог</b>",
+            f"   ⤷ 📁 категорий: <b>{stats['categories']}</b>",
+            f"   ⤷ 📦 товаров: <b>{stats['products']}</b>",
+            "",
+            "📋 <b>Заказы</b>",
+            f"   ⤷ 🆕 новых: <b>{stats['orders_new']}</b>",
+            f"   ⤷ ⚡ в работе: <b>{stats['orders_inwork']}</b>",
+            f"   ⤷ 📂 в архиве: <b>{stats['orders_archive']}</b>",
+            f"   ⤷ 📊 всего: <b>{stats['orders']}</b>",
+            "",
+            f"💰 <b>Выручка (всего):</b> {stats['revenue']:,} грн",
+        ],
     )
 
     await _safe_edit(
@@ -784,6 +939,21 @@ async def callback_admin_settings(callback: CallbackQuery) -> None:
         reply_markup=_get_admin_settings_kb(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:maintenance:toggle")
+async def callback_admin_maintenance_toggle(callback: CallbackQuery) -> None:
+    if not is_privileged_admin(callback.from_user.id):
+        await callback.answer("Только владелец или админ может переключать техработы", show_alert=True)
+        return
+    toggle_maintenance()
+    on = is_maintenance()
+    await _safe_edit(
+        callback.message,
+        _admin_settings_text(),
+        reply_markup=_get_admin_settings_kb(),
+    )
+    await callback.answer("🛠 Техработы ВКЛ — клиенты не попадут в магазин" if on else "✅ Техработы ВЫКЛ — витрина снова для всех", show_alert=True)
 
 
 @router.callback_query(F.data == "admin:settings:notif")
@@ -822,12 +992,133 @@ async def callback_admin_settings_service(callback: CallbackQuery) -> None:
 
     await _safe_edit(
         callback.message,
-        "🗂 <b>Сервис</b>\n"
-        "──────────────\n"
-        "<i>Резервные операции и обслуживание данных магазина</i>",
+        ui_screen(
+            emoji="🗂",
+            title="Сервис",
+            intro="Инструменты для обслуживания данных — используйте перед крупными изменениями.",
+            groups=[
+                ("💾", "Бэкап базы", "Скачать копию SQLite одним файлом"),
+            ],
+        ),
         reply_markup=_get_admin_settings_service_kb(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:settings:business_hours")
+async def callback_admin_settings_business_hours(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    await _safe_edit(
+        callback.message,
+        _admin_business_hours_text(),
+        reply_markup=admin_business_hours_kb(enabled=is_business_hours_restriction_enabled()),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:bhours:toggle")
+async def callback_admin_bhours_toggle(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    set_business_hours_enabled(not is_business_hours_restriction_enabled())
+    await _safe_edit(
+        callback.message,
+        _admin_business_hours_text(),
+        reply_markup=admin_business_hours_kb(enabled=is_business_hours_restriction_enabled()),
+    )
+    await callback.answer("✅ Сохранено")
+
+
+@router.callback_query(F.data == "admin:bhours:start")
+async def callback_admin_bhours_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.set_state(AdminBusinessHours.start_time)
+    hs, _ = get_business_hours_bounds()
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:bhours:cancel")]]
+    )
+    await callback.message.answer(
+        f"🕐 <b>Время начала приёма</b>\n\n"
+        f"Сейчас: <code>{hs}</code>\n"
+        "Отправьте новое значение в формате <b>ЧЧ:ММ</b> (например <code>09:00</code>).",
+        reply_markup=cancel_kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:bhours:end")
+async def callback_admin_bhours_end(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.set_state(AdminBusinessHours.end_time)
+    _, he = get_business_hours_bounds()
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:bhours:cancel")]]
+    )
+    await callback.message.answer(
+        f"🕙 <b>Время окончания приёма</b>\n\n"
+        f"Сейчас: <code>{he}</code>\n"
+        "Отправьте новое значение в формате <b>ЧЧ:ММ</b> (например <code>21:00</code>).",
+        reply_markup=cancel_kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:bhours:cancel")
+async def callback_admin_bhours_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    await _safe_edit(
+        callback.message,
+        _admin_business_hours_text(),
+        reply_markup=admin_business_hours_kb(enabled=is_business_hours_restriction_enabled()),
+    )
+    await callback.answer()
+
+
+@router.message(AdminBusinessHours.start_time, F.text)
+async def admin_business_hours_set_start(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    ok, err = set_business_hours_time(start=(message.text or "").strip())
+    if not ok:
+        await message.answer(f"⚠️ {err}")
+        return
+    await state.clear()
+    await message.answer(
+        "✅ <b>Время начала сохранено</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🕐 К экрану времени работы", callback_data="admin:settings:business_hours")]]
+        ),
+    )
+
+
+@router.message(AdminBusinessHours.end_time, F.text)
+async def admin_business_hours_set_end(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    ok, err = set_business_hours_time(end=(message.text or "").strip())
+    if not ok:
+        await message.answer(f"⚠️ {err}")
+        return
+    await state.clear()
+    await message.answer(
+        "✅ <b>Время окончания сохранено</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🕐 К экрану времени работы", callback_data="admin:settings:business_hours")]]
+        ),
+    )
 
 
 @router.callback_query(F.data == "admin:notif:new")
@@ -926,10 +1217,11 @@ async def callback_admin_db_backup(callback: CallbackQuery) -> None:
 
         await callback.message.answer_document(
             FSInputFile(backup_path, filename=f"shop_backup_{stamp}.sqlite"),
-            caption=(
-                "<b>✅ Бэкап базы</b>\n"
-                "──────────────\n"
-                f"🗓 <code>{stamp}</code>"
+            caption=ui_panel(
+                emoji="✅",
+                title="Бэкап базы",
+                intro="Файл SQLite готов к сохранению на вашем устройстве.",
+                body_lines=[f"🗓 <b>Метка времени:</b> <code>{stamp}</code>"],
             ),
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="⬅ К сервису", callback_data="admin:settings:service")]]

@@ -50,7 +50,8 @@ from keyboards.inline.shop_inline import (
     product_survey_kb,
     wishlist_kb,
 )
-from keyboards.inline.user_inline import main_menu_inline_kb, profile_actions_inline_kb, admin_menu_inline_kb, admin_text_menus_kb, admin_text_menu_actions_kb, admin_text_menu_cancel_kb
+from data.config import DEFAULT_SHOP_MENU_CAPTION
+from keyboards.inline.user_inline import main_menu_inline_kb, profile_actions_inline_kb, admin_text_menus_kb, admin_text_menu_actions_kb, admin_text_menu_cancel_kb
 from utils.db_api.shop import (
     add_to_cart,
     add_admin_user,
@@ -119,12 +120,13 @@ from utils.db_api.shop import (
     toggle_promocode_id,
     update_product_rating_comment,
     is_maintenance,
+    is_within_business_hours,
+    get_business_hours_bounds,
     set_welcome_message,
     is_owner_user,
     update_order_status,
     update_product,
     update_user_contacts,
-    toggle_maintenance,
     wishlist_has,
     wishlist_list,
     wishlist_toggle,
@@ -136,6 +138,7 @@ from utils.db_api.shop import (
     get_main_menu_message,
     set_main_menu_message,
 )
+from utils.ui_sections import ui_panel, ui_screen
 from .shop_state import (
     AdminAddProduct,
     AdminBroadcast,
@@ -204,6 +207,36 @@ def _is_privileged(user_id: int) -> bool:
 
 def _admin_shop_markup(viewer_id: int):
     return admin_shop_kb(_is_owner(viewer_id), full_access=_is_privileged(viewer_id))
+
+
+def _admin_delivery_settings_caption() -> str:
+    return ui_panel(
+        emoji="🚚",
+        title="Способы доставки",
+        intro="Нажмите на строку — способ станет доступен или скроется у клиентов.",
+        body_lines=["📍 <i>Хотя бы один активный способ упростит оформление заказа.</i>"],
+    )
+
+
+def _admin_shop_screen_text(viewer_id: int) -> str:
+    groups = [
+        ("🛍", "Каталог и заказы", "Товары, категории, статусы заказов и чеки"),
+        ("💳", "Платежи и доставка", "Оплата, реквизиты и способы доставки"),
+        ("🛟", "Обращения в поддержку", "Тикеты клиентов в одном месте"),
+    ]
+    if _is_privileged(viewer_id):
+        groups.extend(
+            [
+                ("📦", "Экспорт и импорт", "Каталог и заказы в файлах"),
+                ("👨‍💼", "Команда и промо", "Админы, рассылки и промокоды"),
+            ]
+        )
+    return ui_screen(
+        emoji="⚙️",
+        title="Управление магазином",
+        intro="Подсказки ниже соответствуют кнопкам. Выберите раздел, чтобы продолжить.",
+        groups=groups,
+    )
 
 
 def _role_label(role: str) -> str:
@@ -459,10 +492,11 @@ async def _render_catalog(source: CallbackQuery | Message, state: FSMContext, *,
         )
 
     if not products:
-        empty_text = (
-            "<b>🔍 Ничего не нашли</b>\n"
-            "──────────────\n"
-            "<i>Попробуйте другие слова или откройте категорию.</i>"
+        empty_text = ui_panel(
+            emoji="🔍",
+            title="Ничего не нашли",
+            intro="Попробуйте другие слова, сократите запрос или откройте категорию.",
+            body_lines=["🧭 <i>Кнопки ниже вернут к списку категорий.</i>"],
         )
         if use_answer:
             await message.answer(empty_text, reply_markup=categories_kb(list_categories()))
@@ -470,11 +504,20 @@ async def _render_catalog(source: CallbackQuery | Message, state: FSMContext, *,
             await _safe_edit(message, empty_text, reply_markup=categories_kb(list_categories()))
         return
 
-    text = "<b>🗂 Каталог</b>\n──────────────"
     if st.get("search"):
-        text += f"\n🔎 <i>Поиск:</i> <b>{st['search']}</b>"
+        text = ui_panel(
+            emoji="🗂",
+            title="Каталог",
+            intro=f"Результаты по запросу «{st['search']}»",
+            body_lines=["🔎 <i>При необходимости измените формулировку или откройте категорию снизу.</i>"],
+        )
     else:
-        text += "\n<i>Выберите товар из списка</i>"
+        text = ui_panel(
+            emoji="🗂",
+            title="Каталог",
+            intro="Листайте страницы и откройте карточку товара.",
+            body_lines=["📋 <i>Назад к категориям — кнопка внизу экрана.</i>"],
+        )
 
     kb = catalog_kb(products, page=st["page"], total_pages=max(1, ceil(total / PER_PAGE)))
     if use_answer:
@@ -498,7 +541,16 @@ async def catalog_root(callback: CallbackQuery, state: FSMContext) -> None:
     )
     await _safe_edit(
         callback.message,
-        "<b>📂 Категории</b>\n──────────────\n<i>Раздел или поиск — как вам удобнее</i>",
+        ui_screen(
+            emoji="📂",
+            title="Категории",
+            intro="Выберите раздел витрины или воспользуйтесь поиском.",
+            groups=[
+                ("📁", "Категории", "Товары сгруппированы по темам"),
+                ("🔎", "Поиск", "По названию, описанию и бренду"),
+                ("❤️", "Избранное и корзина", "Быстрые кнопки внизу этого экрана"),
+            ],
+        ),
         reply_markup=categories_kb(list_categories()),
     )
     await callback.answer()
@@ -528,10 +580,15 @@ async def search_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SearchForm.query)
     await _safe_edit(
         callback.message,
-        "<b>🔎 Поиск по каталогу</b>\n"
-        "──────────────\n"
-        "Напишите слово или фразу — по названию, описанию и категории.\n\n"
-        "<i>Опечатки тоже учтём, насколько возможно.</i>",
+        ui_panel(
+            emoji="🔎",
+            title="Поиск по каталогу",
+            intro="Отправьте одно сообщение со словом или фразой.",
+            body_lines=[
+                "📝 <b>Учитываем</b> · название, описание, категория, бренд",
+                "✨ <i>Лёгкие опечатки подстрахуем подбором похожих слов</i>",
+            ],
+        ),
         reply_markup=back_menu_kb("menu:catalog"),
     )
     await callback.answer()
@@ -936,6 +993,14 @@ async def checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(CheckoutForm.delivery_method, F.data.startswith("shop:delivery:"))
 async def checkout_delivery_select(callback: CallbackQuery, state: FSMContext) -> None:
     delivery_key = callback.data.split(":")[-1]
+    if delivery_key == "city" and not is_within_business_hours():
+        hs, he = get_business_hours_bounds()
+        await callback.answer(
+            f"Доставка по городу с {hs} до {he} (время сервера бота). Сейчас нерабочее время.",
+            show_alert=True,
+        )
+        return
+
     delivery_label = DELIVERY_LABELS.get(delivery_key, "Новая почта")
     await state.update_data(checkout_delivery=delivery_label, checkout_delivery_key=delivery_key)
 
@@ -1150,6 +1215,14 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     delivery_key = str(data.get("checkout_delivery_key") or "")
 
+    if delivery_key == "city" and not is_within_business_hours():
+        hs, he = get_business_hours_bounds()
+        await callback.answer(
+            f"Доставка по городу недоступна вне {hs}–{he}. Оформите позже или выберите другой способ доставки.",
+            show_alert=True,
+        )
+        return
+
     # Для доставки "По городу" разрешаем только оплату картой.
     if delivery_key == "city" and key != "card":
         await callback.answer("Для доставки по городу доступна только оплата картой", show_alert=True)
@@ -1234,7 +1307,17 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
     phone = data.get("checkout_phone", "")
     delivery_address = data.get("checkout_delivery_address", "")
     delivery = data.get("checkout_delivery", DELIVERY_NOVA)
+    delivery_key = str(data.get("checkout_delivery_key") or "")
     user_id = callback.from_user.id
+
+    if delivery_key == "city" and not is_within_business_hours():
+        hs, he = get_business_hours_bounds()
+        await state.clear()
+        await callback.answer(
+            f"Доставка по городу с {hs} до {he}. Сейчас нерабочее время — заказ не создан.",
+            show_alert=True,
+        )
+        return
 
     cart_sum = cart_total(user_id)
     promo_off, promo_err, promo_code = promo_discount_for_user_cart(user_id)
@@ -1860,25 +1943,6 @@ async def profile_branch_save(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.callback_query(F.data == "admin:maintenance:toggle")
-async def admin_toggle_maintenance(callback: CallbackQuery) -> None:
-    if not _is_privileged(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-
-    enabled = toggle_maintenance()
-    try:
-        await callback.message.edit_reply_markup(
-            reply_markup=admin_menu_inline_kb(
-                maintenance_enabled=enabled,
-                full_access=_is_privileged(callback.from_user.id),
-            )
-        )
-    except TelegramBadRequest:
-        pass
-    await callback.answer("🛠 Тех.работы ВКЛЮЧЕНЫ" if enabled else "✅ Тех.работы ВЫКЛЮЧЕНЫ", show_alert=True)
-
-
 @router.callback_query(F.data == "admin:welcome:edit")
 async def admin_welcome_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not _is_privileged(callback.from_user.id):
@@ -1913,7 +1977,7 @@ async def admin_welcome_photo(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
     data = await state.get_data()
-    set_welcome_message(data.get("welcome_text", "Добро пожаловать"), message.photo[-1].file_id)
+    set_welcome_message(data.get("welcome_text", DEFAULT_SHOP_MENU_CAPTION), message.photo[-1].file_id)
     await state.clear()
     await message.answer(
         "<b>✅ Приветствие сохранено</b>\n──────────────\n<i>С фотографией</i>",
@@ -1934,7 +1998,7 @@ async def admin_welcome_no_photo(message: Message, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    set_welcome_message(data.get("welcome_text", "Добро пожаловать"), "")
+    set_welcome_message(data.get("welcome_text", DEFAULT_SHOP_MENU_CAPTION), "")
     await state.clear()
     await message.answer(
         "<b>✅ Приветствие сохранено</b>\n──────────────\n<i>Только текст</i>",
@@ -1976,7 +2040,7 @@ async def admin_main_menu_photo(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
     data = await state.get_data()
-    set_main_menu_message(data.get("main_menu_text", "🏠 Главное меню\n\nВыберите раздел ниже"), message.photo[-1].file_id)
+    set_main_menu_message(data.get("main_menu_text", DEFAULT_SHOP_MENU_CAPTION), message.photo[-1].file_id)
     await state.clear()
     await message.answer(
         "<b>✅ Главное меню сохранено</b>\n──────────────\n<i>С фотографией</i>",
@@ -1997,7 +2061,7 @@ async def admin_main_menu_no_photo(message: Message, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    set_main_menu_message(data.get("main_menu_text", "🏠 Главное меню\n\nВыберите раздел ниже"), "")
+    set_main_menu_message(data.get("main_menu_text", DEFAULT_SHOP_MENU_CAPTION), "")
     await state.clear()
     await message.answer(
         "<b>✅ Главное меню сохранено</b>\n──────────────\n<i>Только текст</i>",
@@ -2011,17 +2075,11 @@ async def admin_shop(callback: CallbackQuery) -> None:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
+    vid = callback.from_user.id
     await _safe_edit(
         callback.message,
-        "<b>⚙️ Управление магазином</b>\n"
-        "──────────────\n"
-        "🛍 Каталог и заказы\n"
-        "🎨 Оформление и витрина\n"
-        "💳 Платежи и доставка\n"
-        "📊 Аналитика и клиенты\n"
-        "📦 Импорт и экспорт\n"
-        "👨‍💼 Команда и промо",
-        reply_markup=_admin_shop_markup(callback.from_user.id),
+        _admin_shop_screen_text(vid),
+        reply_markup=_admin_shop_markup(vid),
     )
     await callback.answer()
 
@@ -2033,11 +2091,16 @@ async def admin_section_catalog(callback: CallbackQuery) -> None:
         return
     await _safe_edit(
         callback.message,
-        "<b>🛍 Каталог и заказы</b>\n"
-        "──────────────\n"
-        "📦 Товары и категории\n"
-        "📋 Заказы и статусы\n"
-        "🧾 Проверка чеков",
+        ui_screen(
+            emoji="🛍",
+            title="Каталог и заказы",
+            intro="Витрина и обработка заказов в одном блоке.",
+            groups=[
+                ("📦", "Товары и категории", "Цены, остатки, фото и структура каталога"),
+                ("📋", "Заказы", "Новые, в работе, архив"),
+                ("🧾", "Чеки клиентов", "Проверка оплат по фото и PDF"),
+            ],
+        ),
         reply_markup=admin_section_catalog_kb(),
     )
     await callback.answer()
@@ -2050,10 +2113,15 @@ async def admin_section_appearance(callback: CallbackQuery) -> None:
         return
     await _safe_edit(
         callback.message,
-        "<b>🎨 Оформление магазина</b>\n"
-        "──────────────\n"
-        "💬 Приветствие и главное меню\n"
-        "🖼 Текст + фото для экранов",
+        ui_screen(
+            emoji="🎨",
+            title="Оформление магазина",
+            intro="То, что клиент видит при старте и в главном меню.",
+            groups=[
+                ("📝", "Приветствие /start", "Текст и фото на экране запуска"),
+                ("🏠", "Главное меню", "Текст и опциональное изображение меню"),
+            ],
+        ),
         reply_markup=admin_section_appearance_kb(),
     )
     await callback.answer()
@@ -2066,11 +2134,16 @@ async def admin_section_payments(callback: CallbackQuery) -> None:
         return
     await _safe_edit(
         callback.message,
-        "<b>💳 Платежи и доставка</b>\n"
-        "──────────────\n"
-        "💰 Способы оплаты\n"
-        "🏦 Реквизиты\n"
-        "🚚 Доставка и доступность",
+        ui_screen(
+            emoji="💳",
+            title="Платежи и доставка",
+            intro="Настройте приём оплаты и доступные способы получения заказа.",
+            groups=[
+                ("💰", "Способы оплаты", "Наложка, карта, Apple Pay и Google Pay"),
+                ("🏦", "Реквизиты", "Тексты для экрана оплаты клиента"),
+                ("🚚", "Доставка", "Новая почта, город, самовывоз — вкл/выкл"),
+            ],
+        ),
         reply_markup=admin_section_payments_kb(),
     )
     await callback.answer()
@@ -2083,11 +2156,16 @@ async def admin_section_insights(callback: CallbackQuery) -> None:
         return
     await _safe_edit(
         callback.message,
-        "<b>📊 Информация и статистика</b>\n"
-        "──────────────\n"
-        "📰 О боте\n"
-        "📈 Метрики и сводка\n"
-        "👥 База клиентов",
+        ui_screen(
+            emoji="📊",
+            title="Информация и статистика",
+            intro="Сводки по магазину и работа с клиентской базой.",
+            groups=[
+                ("📰", "О боте", "Системные ID и ключевые цифры"),
+                ("📈", "Метрики", "Сводка за неделю и развёрнутая статистика"),
+                ("👥", "Клиенты", "Список покупателей и карточки"),
+            ],
+        ),
         reply_markup=admin_section_insights_kb(),
     )
     await callback.answer()
@@ -2100,11 +2178,15 @@ async def admin_section_io(callback: CallbackQuery) -> None:
         return
     await _safe_edit(
         callback.message,
-        "<b>📦 Экспорт и импорт</b>\n"
-        "──────────────\n"
-        "📤 Экспорт каталога и заказов\n"
-        "📥 Импорт каталога\n"
-        "🛡 Резервные операции",
+        ui_screen(
+            emoji="📦",
+            title="Экспорт и импорт",
+            intro="Файлы для Excel и резервные копии каталога.",
+            groups=[
+                ("📥", "Заказы CSV", "Выгрузка таблицы с промокодами"),
+                ("📤", "Каталог JSON", "Полный экспорт и импорт витрины"),
+            ],
+        ),
         reply_markup=admin_section_io_kb(),
     )
     await callback.answer()
@@ -2117,11 +2199,16 @@ async def admin_section_team(callback: CallbackQuery) -> None:
         return
     await _safe_edit(
         callback.message,
-        "<b>👨‍💼 Команда и промо</b>\n"
-        "──────────────\n"
-        "🛡 Права администраторов\n"
-        "📣 Рассылки клиентам\n"
-        "🏷 Промокоды",
+        ui_screen(
+            emoji="👨‍💼",
+            title="Команда и промо",
+            intro="Кто управляет магазином и как привлекать клиентов.",
+            groups=[
+                ("🛡", "Администраторы", "Права, менеджеры и техподдержка"),
+                ("📣", "Рассылка", "Одно сообщение всем клиентам бота"),
+                ("🏷", "Промокоды", "Процент или сумма скидки, лимиты активаций"),
+            ],
+        ),
         reply_markup=admin_section_team_kb(can_manage_admins=_is_owner(callback.from_user.id)),
     )
     await callback.answer()
@@ -2136,9 +2223,7 @@ async def admin_delivery_settings(callback: CallbackQuery) -> None:
     ds = get_delivery_settings()
     await _safe_edit(
         callback.message,
-        "<b>🚚 Способы доставки</b>\n"
-        "──────────────\n"
-        "<i>Нажмите на способ доставки, чтобы включить или отключить его</i>",
+        _admin_delivery_settings_caption(),
         reply_markup=admin_delivery_settings_kb(nova=ds["nova"], city=ds["city"], pickup=ds["pickup"]),
     )
     await callback.answer()
@@ -2159,9 +2244,7 @@ async def admin_delivery_toggle(callback: CallbackQuery) -> None:
     ds = get_delivery_settings()
     await _safe_edit(
         callback.message,
-        "<b>🚚 Способы доставки</b>\n"
-        "──────────────\n"
-        "<i>Нажмите на способ доставки, чтобы включить или отключить его</i>",
+        _admin_delivery_settings_caption(),
         reply_markup=admin_delivery_settings_kb(nova=ds["nova"], city=ds["city"], pickup=ds["pickup"]),
     )
     await callback.answer("✅ Обновлено")
@@ -2575,6 +2658,38 @@ async def admin_edit_stock_start(callback: CallbackQuery, state: FSMContext) -> 
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("admin:product:desc:"))
+async def admin_edit_desc_start(callback: CallbackQuery, state: FSMContext) -> None:
+    product_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminEditProduct.description)
+    await state.update_data(edit_product_id=product_id)
+    await _safe_edit(
+        callback.message,
+        "<b>📝 Новое описание</b>\n──────────────\n<i>Текст карточки товара (HTML допускается)</i>",
+        reply_markup=back_admin_kb("admin:product:list"),
+    )
+    await callback.answer()
+
+
+@router.message(AdminEditProduct.description, F.text)
+async def admin_edit_description(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    pid = int(data["edit_product_id"])
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(
+            "<b>⚠ Пустой текст</b>",
+            reply_markup=back_admin_kb("admin:product:list"),
+        )
+        return
+    update_product(pid, description=text[:3500])
+    await state.clear()
+    await message.answer(
+        "<b>✅ Описание сохранено</b>",
+        reply_markup=back_admin_kb("admin:product:list"),
+    )
+
+
 @router.message(AdminEditProduct.stock)
 async def admin_edit_stock(message: Message, state: FSMContext) -> None:
     if not (message.text or "").isdigit():
@@ -2653,7 +2768,12 @@ async def admin_orders(callback: CallbackQuery) -> None:
     if not orders:
         await _safe_edit(
             callback.message,
-            "<b>📋 Заказы</b>\n──────────────\n<i>Список заказов пока пуст.</i>",
+            ui_panel(
+                emoji="📋",
+                title="Заказы",
+                intro="Пока нет ни одного заказа — как только клиент оформит покупку, он появится здесь.",
+                body_lines=["🛒 <i>Проверьте витрину и способы оплаты, если ожидали заказы раньше.</i>"],
+            ),
             reply_markup=back_admin_kb("admin:section:catalog"),
         )
         await callback.answer()
@@ -2664,7 +2784,17 @@ async def admin_orders(callback: CallbackQuery) -> None:
     has_archive = any(o.get("status_raw", "") in _ARCHIVE_STATUSES for o in orders)
     await _safe_edit(
         callback.message,
-        "<b>📋 Заказы</b>\n──────────────\n<i>Выберите нужный раздел для просмотра заказов</i>",
+        ui_screen(
+            emoji="📋",
+            title="Заказы",
+            intro="Разделите поток по статусам или найдите заказ по чеку.",
+            groups=[
+                ("🔵", "Новые", "Только что оформленные и ожидающие обработки"),
+                ("🔄", "В работе", "Оплаченные и отправленные"),
+                ("📁", "Архив", "Доставленные и отменённые"),
+                ("🧾", "Поиск по чеку", "Фильтр по статусу проверки оплаты"),
+            ],
+        ),
         reply_markup=admin_orders_menu_kb(has_new=has_new, has_inwork=has_inwork, has_archive=has_archive),
     )
     await callback.answer()
@@ -2692,13 +2822,14 @@ def _promos_admin_view() -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton(text="🗑", callback_data=f"admin:promo:d:{pid}"),
             ]
         )
-    body = "\n".join(lines) if lines else "<i>Промокодов пока нет.</i>"
-    text = (
-        "<b>🏷 Промокоды</b>\n"
-        "──────────────\n"
-        "<i>Управление скидочными кодами магазина</i>\n\n"
-        + body
+    body = "\n".join(lines) if lines else "📭 <i>Промокодов пока нет — создайте первый кнопкой ниже.</i>"
+    head = ui_panel(
+        emoji="🏷",
+        title="Промокоды",
+        intro="Включение, лимиты и удаление. В строке кнопки ↻ и 🗑 управляют кодом.",
+        body_lines=[],
     )
+    text = f"{head}\n\n{body}"
     kb_rows.append([InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin:promo:add")])
     kb_rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:shop")])
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
@@ -2711,16 +2842,21 @@ async def admin_analytics(callback: CallbackQuery) -> None:
         return
 
     ax = get_analytics_extended()
-    lines_sales = "\n".join(f"  • {t[0]} — {t[1]} шт, {t[2]} грн" for t in ax["top_sales"]) or "  —"
-    lines_views = "\n".join(f"  • {t[0]} — {t[1]} просмотров" for t in ax["top_views"]) or "  —"
-    text = (
-        "<b>📊 Сводка за 7 дней</b>\n"
-        "──────────────\n"
-        "<b>Топ продаж</b>\n"
-        f"{lines_sales}\n\n"
-        "<b>Топ просмотров (всё время)</b>\n"
-        f"{lines_views}\n\n"
-        f"🏷 Заказов с промокодом (всего): <b>{ax['orders_with_promo']}</b>"
+    lines_sales = "\n".join(f"  ▸ {t[0]} · <b>{t[1]}</b> шт · <b>{t[2]}</b> грн" for t in ax["top_sales"]) or "  <i>— нет данных —</i>"
+    lines_views = "\n".join(f"  ▸ {t[0]} · <b>{t[1]}</b> просм." for t in ax["top_views"]) or "  <i>— нет данных —</i>"
+    text = ui_panel(
+        emoji="📊",
+        title="Сводка",
+        intro="Срез за 7 дней по продажам и интерес к товарам (просмотры).",
+        body_lines=[
+            "📈 <b>Топ продаж</b> <i>(7 дней)</i>",
+            lines_sales,
+            "",
+            "👁 <b>Топ просмотров</b> <i>(всё время)</i>",
+            lines_views,
+            "",
+            f"🏷 <b>Заказов с промокодом (всего):</b> {ax['orders_with_promo']}",
+        ],
     )
     await _safe_edit(callback.message, text, reply_markup=back_admin_kb("admin:section:insights"))
     await callback.answer()

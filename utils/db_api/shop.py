@@ -3,10 +3,15 @@ import json
 import re
 import secrets
 import sqlite3
+import string
 from difflib import SequenceMatcher
 from typing import Any
 
+from data.config import DEFAULT_SHOP_MENU_CAPTION
 from utils.db_api.sqlite import path_to_db
+
+_LEGACY_WELCOME_TEXT = "Задай Текст Приветствия в Настройках"
+_LEGACY_MAIN_MENU_TEXT = "<b>🏠 Главное меню</b>\n\n<i>Выберите раздел ниже</i>"
 
 
 def _now() -> str:
@@ -67,6 +72,16 @@ def init_shop_tables() -> None:
             db.execute("ALTER TABLE storage_shop_users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
         if not _column_exists(db, "storage_shop_users", "bonus"):
             db.execute("ALTER TABLE storage_shop_users ADD COLUMN bonus INTEGER NOT NULL DEFAULT 0")
+        if not _column_exists(db, "storage_shop_users", "cart_activity_at"):
+            db.execute("ALTER TABLE storage_shop_users ADD COLUMN cart_activity_at TEXT NOT NULL DEFAULT ''")
+        if not _column_exists(db, "storage_shop_users", "cart_abandon_reminder_at"):
+            db.execute("ALTER TABLE storage_shop_users ADD COLUMN cart_abandon_reminder_at TEXT NOT NULL DEFAULT ''")
+        if not _column_exists(db, "storage_shop_users", "referral_code"):
+            db.execute("ALTER TABLE storage_shop_users ADD COLUMN referral_code TEXT NOT NULL DEFAULT ''")
+        if not _column_exists(db, "storage_shop_users", "referred_by"):
+            db.execute("ALTER TABLE storage_shop_users ADD COLUMN referred_by INTEGER NOT NULL DEFAULT 0")
+        if not _column_exists(db, "storage_shop_users", "referral_rewarded"):
+            db.execute("ALTER TABLE storage_shop_users ADD COLUMN referral_rewarded INTEGER NOT NULL DEFAULT 0")
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS storage_shop_categories(
@@ -282,6 +297,14 @@ def init_shop_tables() -> None:
         db.execute(
             "INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('notif_user_status_enabled', '1')"
         )
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('referral_program_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('referral_bonus_inviter', '50')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('referral_bonus_referee', '25')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('cart_abandon_hours', '3')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('cart_abandon_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('business_hours_enabled', '0')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('business_hours_start', '09:00')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('business_hours_end', '21:00')")
 
         from data.config import adm, sozdatel
 
@@ -308,6 +331,17 @@ def init_shop_tables() -> None:
 
         db.commit()
 
+    _migrate_legacy_menu_branding()
+
+
+def _migrate_legacy_menu_branding() -> None:
+    wt = get_shop_setting("welcome_text", "")
+    if wt == _LEGACY_WELCOME_TEXT:
+        set_shop_setting("welcome_text", DEFAULT_SHOP_MENU_CAPTION)
+    mt = get_shop_setting("main_menu_text", "")
+    if mt == _LEGACY_MAIN_MENU_TEXT:
+        set_shop_setting("main_menu_text", DEFAULT_SHOP_MENU_CAPTION)
+
 
 def get_shop_setting(key: str, default: str = "") -> str:
     with sqlite3.connect(path_to_db) as db:
@@ -327,7 +361,7 @@ def set_shop_setting(key: str, value: str) -> None:
 
 
 def get_welcome_message() -> tuple[str, str]:
-    return get_shop_setting("welcome_text", "Задай Текст Приветствия в Настройках"), get_shop_setting("welcome_photo", "")
+    return get_shop_setting("welcome_text", DEFAULT_SHOP_MENU_CAPTION), get_shop_setting("welcome_photo", "")
 
 
 def set_welcome_message(text: str, photo: str = "") -> None:
@@ -336,7 +370,7 @@ def set_welcome_message(text: str, photo: str = "") -> None:
 
 
 def get_main_menu_message() -> tuple[str, str]:
-    return get_shop_setting("main_menu_text", "<b>🏠 Главное меню</b>\n\n<i>Выберите раздел ниже</i>"), get_shop_setting("main_menu_photo", "")
+    return get_shop_setting("main_menu_text", DEFAULT_SHOP_MENU_CAPTION), get_shop_setting("main_menu_photo", "")
 
 
 def set_main_menu_message(text: str, photo: str = "") -> None:
@@ -396,6 +430,65 @@ def get_delivery_settings() -> dict[str, bool]:
         "city": get_shop_setting("delivery_city_enabled", "1") == "1",
         "pickup": get_shop_setting("delivery_pickup_enabled", "1") == "1",
     }
+
+
+def parse_hh_mm(value: str) -> int | None:
+    """Минуты от полуночи для строки ЧЧ:ММ или H:MM. Некорректное — None."""
+    raw = (value or "").strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})$", raw)
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if h > 23 or mi > 59:
+        return None
+    return h * 60 + mi
+
+
+def is_business_hours_restriction_enabled() -> bool:
+    return get_shop_setting("business_hours_enabled", "0") == "1"
+
+
+def get_business_hours_bounds() -> tuple[str, str]:
+    return get_shop_setting("business_hours_start", "09:00").strip(), get_shop_setting("business_hours_end", "21:00").strip()
+
+
+def is_within_business_hours(now: datetime.datetime | None = None) -> bool:
+    """Если ограничение выключено — всегда True. Учитывает интервал через полночь (начало больше конца)."""
+    if not is_business_hours_restriction_enabled():
+        return True
+    start_s, end_s = get_business_hours_bounds()
+    start_m = parse_hh_mm(start_s)
+    end_m = parse_hh_mm(end_s)
+    if start_m is None or end_m is None:
+        return True
+    cur = now or datetime.datetime.now()
+    now_m = cur.hour * 60 + cur.minute
+    if start_m <= end_m:
+        return start_m <= now_m <= end_m
+    return now_m >= start_m or now_m <= end_m
+
+
+def business_hours_hint_html() -> str:
+    start_s, end_s = get_business_hours_bounds()
+    return f"Принимаем с <b>{start_s}</b> до <b>{end_s}</b> (время сервера, где запущен бот)."
+
+
+def set_business_hours_enabled(on: bool) -> None:
+    set_shop_setting("business_hours_enabled", "1" if on else "0")
+
+
+def set_business_hours_time(*, start: str | None = None, end: str | None = None) -> tuple[bool, str]:
+    if start is not None:
+        s = start.strip()
+        if parse_hh_mm(s) is None:
+            return False, "Начало: формат ЧЧ:ММ, например 09:00"
+        set_shop_setting("business_hours_start", s)
+    if end is not None:
+        e = end.strip()
+        if parse_hh_mm(e) is None:
+            return False, "Конец: формат ЧЧ:ММ, например 21:00"
+        set_shop_setting("business_hours_end", e)
+    return True, ""
 
 
 def is_maintenance() -> bool:
@@ -529,7 +622,11 @@ def get_user_profile(telegram_id: int) -> dict[str, Any]:
     ensure_user(telegram_id)
     with sqlite3.connect(path_to_db) as db:
         row = db.execute(
-            "SELECT telegram_id, name, phone, address, created_at, role, bonus FROM storage_shop_users WHERE telegram_id = ?",
+            """
+            SELECT telegram_id, name, phone, address, created_at, role, bonus,
+                   referral_code, referred_by, referral_rewarded
+            FROM storage_shop_users WHERE telegram_id = ?
+            """,
             (telegram_id,),
         ).fetchone()
 
@@ -541,6 +638,9 @@ def get_user_profile(telegram_id: int) -> dict[str, Any]:
         "created_at": row[4] or "",
         "role": row[5] or "user",
         "bonus": int(row[6]) if row[6] else 0,
+        "referral_code": (row[7] or "").strip(),
+        "referred_by": int(row[8] or 0),
+        "referral_rewarded": bool(int(row[9] or 0)),
     }
 
 
@@ -562,6 +662,173 @@ def set_user_bonus(user_id: int, amount: int) -> None:
             (amount, user_id),
         )
         db.commit()
+
+
+_REF_CODE_CHARS = string.ascii_uppercase + string.digits
+
+
+def touch_cart_activity(user_id: int) -> None:
+    ensure_user(user_id)
+    ts = _now()
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            "UPDATE storage_shop_users SET cart_activity_at = ? WHERE telegram_id = ?",
+            (ts, user_id),
+        )
+        db.commit()
+
+
+def reset_cart_reminder_state(user_id: int) -> None:
+    ensure_user(user_id)
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            "UPDATE storage_shop_users SET cart_activity_at = '', cart_abandon_reminder_at = '' WHERE telegram_id = ?",
+            (user_id,),
+        )
+        db.commit()
+
+
+def mark_cart_abandon_reminder_sent(user_id: int) -> None:
+    ensure_user(user_id)
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            "UPDATE storage_shop_users SET cart_abandon_reminder_at = ? WHERE telegram_id = ?",
+            (_now(), user_id),
+        )
+        db.commit()
+
+
+def list_cart_abandon_candidate_user_ids(hours_idle: float) -> list[int]:
+    if hours_idle <= 0:
+        return []
+    threshold = datetime.datetime.now() - datetime.timedelta(hours=hours_idle)
+    threshold = threshold.replace(microsecond=0)
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            """
+            SELECT DISTINCT c.user_id, u.cart_activity_at, u.cart_abandon_reminder_at
+            FROM storage_shop_cart c
+            JOIN storage_shop_users u ON u.telegram_id = c.user_id
+            """
+        ).fetchall()
+    out: list[int] = []
+    for uid, act_at, rem_at in rows:
+        act_s = (act_at or "").strip()
+        if not act_s:
+            continue
+        try:
+            act_dt = datetime.datetime.fromisoformat(act_s)
+        except ValueError:
+            continue
+        if act_dt > threshold:
+            continue
+        rem_s = (rem_at or "").strip()
+        if not rem_s:
+            out.append(int(uid))
+            continue
+        try:
+            rem_dt = datetime.datetime.fromisoformat(rem_s)
+        except ValueError:
+            out.append(int(uid))
+            continue
+        if act_dt > rem_dt:
+            out.append(int(uid))
+    return out
+
+
+def get_or_create_referral_code(telegram_id: int) -> str:
+    ensure_user(telegram_id)
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            "SELECT referral_code FROM storage_shop_users WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        existing = (row[0] or "").strip() if row else ""
+        if existing:
+            return existing
+        for _ in range(40):
+            code = "".join(secrets.choice(_REF_CODE_CHARS) for _ in range(8))
+            clash = db.execute(
+                "SELECT 1 FROM storage_shop_users WHERE referral_code = ?",
+                (code,),
+            ).fetchone()
+            if clash:
+                continue
+            db.execute(
+                "UPDATE storage_shop_users SET referral_code = ? WHERE telegram_id = ?",
+                (code, telegram_id),
+            )
+            db.commit()
+            return code
+    return ""
+
+
+def apply_referral_from_start_payload(telegram_id: int, start_arg: str) -> None:
+    raw = (start_arg or "").strip()
+    if not raw:
+        return
+    code = ""
+    if raw.lower().startswith("ref_"):
+        code = raw[4:].strip().upper()
+    elif raw.lower().startswith("ref"):
+        code = raw[3:].strip().upper()
+    if not code or len(code) > 16:
+        return
+    ensure_user(telegram_id)
+    with sqlite3.connect(path_to_db) as db:
+        ref_row = db.execute(
+            "SELECT telegram_id FROM storage_shop_users WHERE upper(referral_code) = ? AND telegram_id != ?",
+            (code, telegram_id),
+        ).fetchone()
+        if not ref_row:
+            return
+        referrer_id = int(ref_row[0])
+        row = db.execute(
+            "SELECT referred_by FROM storage_shop_users WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if row and int(row[0] or 0) != 0:
+            return
+        db.execute(
+            "UPDATE storage_shop_users SET referred_by = ? WHERE telegram_id = ? AND (referred_by IS NULL OR referred_by = 0)",
+            (referrer_id, telegram_id),
+        )
+        db.commit()
+
+
+def apply_referral_bonuses_after_first_order(user_id: int) -> tuple[int, int]:
+    """Начисляет бонусы при первом заказе по рефералке. Возвращает (бонус пригласившему, бонус новичку)."""
+    if get_shop_setting("referral_program_enabled", "1") != "1":
+        return 0, 0
+    inviter_bonus = max(0, int(get_shop_setting("referral_bonus_inviter", "50") or 0))
+    referee_bonus = max(0, int(get_shop_setting("referral_bonus_referee", "25") or 0))
+    if inviter_bonus <= 0 and referee_bonus <= 0:
+        return 0, 0
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            "SELECT referred_by, referral_rewarded FROM storage_shop_users WHERE telegram_id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return 0, 0
+        referred_by = int(row[0] or 0)
+        rewarded = int(row[1] or 0)
+        if rewarded or referred_by <= 0 or referred_by == int(user_id):
+            return 0, 0
+        db.execute(
+            "UPDATE storage_shop_users SET bonus = MAX(0, COALESCE(bonus, 0) + ?) WHERE telegram_id = ?",
+            (inviter_bonus, referred_by),
+        )
+        db.execute(
+            "UPDATE storage_shop_users SET bonus = MAX(0, COALESCE(bonus, 0) + ?) WHERE telegram_id = ?",
+            (referee_bonus, user_id),
+        )
+        db.execute(
+            "UPDATE storage_shop_users SET referral_rewarded = 1 WHERE telegram_id = ?",
+            (user_id,),
+        )
+        db.commit()
+    return inviter_bonus, referee_bonus
 
 
 def save_product_rating(order_id: str, user_id: int, product_id: int, rating: int, comment: str = "") -> bool:
@@ -1299,6 +1566,7 @@ def add_to_cart(user_id: int, product_id: int, quantity: int = 1) -> tuple[bool,
 
         db.commit()
 
+    touch_cart_activity(user_id)
     return True, "🛒 Добавлено в корзину"
 
 
@@ -1306,6 +1574,9 @@ def remove_from_cart(user_id: int, product_id: int) -> None:
     with sqlite3.connect(path_to_db) as db:
         db.execute("DELETE FROM storage_shop_cart WHERE user_id = ? AND product_id = ?", (user_id, product_id))
         db.commit()
+    touch_cart_activity(user_id)
+    if not get_cart(user_id):
+        reset_cart_reminder_state(user_id)
 
 
 def update_cart_quantity(user_id: int, product_id: int, quantity: int) -> tuple[bool, str]:
@@ -1326,6 +1597,9 @@ def update_cart_quantity(user_id: int, product_id: int, quantity: int) -> tuple[
         )
         db.commit()
 
+    touch_cart_activity(user_id)
+    if not get_cart(user_id):
+        reset_cart_reminder_state(user_id)
     return True, "Количество обновлено"
 
 
@@ -1345,6 +1619,7 @@ def clear_cart(user_id: int) -> None:
     with sqlite3.connect(path_to_db) as db:
         db.execute("DELETE FROM storage_shop_cart WHERE user_id = ?", (user_id,))
         db.commit()
+    reset_cart_reminder_state(user_id)
 
 
 def get_cart(user_id: int) -> list[dict[str, Any]]:
@@ -1755,6 +2030,8 @@ def create_order_from_cart(
 
     update_user_contacts(user_id, name=name, phone=phone, address=address)
     clear_user_applied_promo(user_id)
+    reset_cart_reminder_state(user_id)
+    apply_referral_bonuses_after_first_order(user_id)
     return True, order_id
 
 

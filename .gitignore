@@ -17,5 +17,6 @@ venv/
 Thumbs.db
 
 # Database backups and temp
+*.sqlite
 *.sqlite-journal
 *.log
