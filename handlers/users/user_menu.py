@@ -230,18 +230,6 @@ async def _safe_edit(message: Message, text: str, reply_markup=None, disable_web
         raise
 
 
-async def _clear_recent_private_chat(message: Message, limit: int = 40) -> None:
-    if getattr(message.chat, "type", "") != "private":
-        return
-
-    start_id = max(1, message.message_id - limit)
-    for message_id in range(message.message_id, start_id - 1, -1):
-        try:
-            await message.bot.delete_message(message.chat.id, message_id)
-        except Exception:
-            continue
-
-
 @router.message(CommandStart())
 @router.message(F.text == "⬅ На главную")
 async def open_main_menu(message: Message, state: FSMContext) -> None:
@@ -253,8 +241,6 @@ async def open_main_menu(message: Message, state: FSMContext) -> None:
     apply_referral_from_start_payload(message.from_user.id, start_arg)
     if get_shop_setting("referral_program_enabled", "1") == "1":
         get_or_create_referral_code(message.from_user.id)
-    if (message.text or "").startswith("/start"):
-        await _clear_recent_private_chat(message)
     welcome_text, welcome_photo = get_welcome_message()
     if is_maintenance() and not _is_admin(message.from_user.id):
         welcome_text = f"{welcome_text}\n\n<b>🛠 Магазин временно на техработах</b>"
