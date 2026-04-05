@@ -1003,6 +1003,7 @@ async def callback_admin_settings_service(callback: CallbackQuery) -> None:
             groups=[
                 ("💾", "Бэкап базы", "Скачать копию SQLite одним файлом"),
                 ("🔄", "Обновить с Git", "Подтянуть изменения из репозитория (только владелец)"),
+                ("♻️", "Перезапуск", "Новый процесс Python — нужен после обновления файлов (только владелец)"),
             ],
         ),
         reply_markup=_get_admin_settings_service_kb(callback.from_user.id),

@@ -198,6 +198,7 @@ def admin_settings_service_inline_kb(*, can_update_repo: bool = False) -> Inline
     ]
     if can_update_repo:
         rows.append([InlineKeyboardButton(text="🔄 Обновить с Git", callback_data="admin:repo:update")])
+        rows.append([InlineKeyboardButton(text="♻️ Перезапустить бота", callback_data="admin:bot:restart")])
     rows.append([InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

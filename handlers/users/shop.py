@@ -61,7 +61,8 @@ from keyboards.inline.shop_inline import (
     wishlist_kb,
     optional_photo_kb,
 )
-from data.config import DEFAULT_SHOP_MENU_CAPTION
+from data.config import BASE_DIR, DEFAULT_SHOP_MENU_CAPTION
+from loader import dispatcher
 from keyboards.inline.user_inline import main_menu_inline_kb, profile_actions_inline_kb, admin_text_menus_kb, admin_text_menu_actions_kb, admin_text_menu_cancel_kb
 from utils.db_api.shop import (
     add_to_cart,
@@ -152,6 +153,7 @@ from utils.db_api.shop import (
     get_main_menu_message,
     set_main_menu_message,
 )
+from utils.bot_restart import cancel_restart_request, mark_restart_requested
 from utils.ui_sections import ui_panel, ui_screen
 from .shop_state import (
     AdminAddProduct,
@@ -177,7 +179,14 @@ init_shop_tables()
 
 PER_PAGE = 6
 REVIEWS_PER_PAGE = 5
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def _git_repo_root() -> str:
+    """Каталог с git-репозиторием: по умолчанию корень проекта (BASE_DIR). На VPS можно задать GIT_REPO_ROOT в .env."""
+    override = (os.getenv("GIT_REPO_ROOT") or "").strip()
+    if override and os.path.isdir(override):
+        return os.path.normpath(os.path.abspath(override))
+    return BASE_DIR
 
 
 def _trim_text(value: str, limit: int = 1000) -> str:
@@ -192,7 +201,7 @@ async def _git_pull_project() -> tuple[bool, str]:
         process = await asyncio.create_subprocess_exec(
             "git",
             "-C",
-            PROJECT_ROOT,
+            _git_repo_root(),
             "pull",
             "--ff-only",
             stdout=asyncio.subprocess.PIPE,
@@ -2463,6 +2472,36 @@ async def admin_repo_update(callback: CallbackQuery) -> None:
     )
     if ok:
         _audit(callback.from_user.id, "repo.update", "git pull --ff-only")
+
+
+@router.callback_query(F.data == "admin:bot:restart")
+async def admin_bot_restart(callback: CallbackQuery) -> None:
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    await callback.answer("Перезапуск...")
+    try:
+        await callback.message.answer(
+            "<b>♻️ Перезапуск бота</b>\n──────────────\n"
+            "<i>Останавливаю приём обновлений и запускаю новый процесс…</i>",
+            reply_markup=back_admin_kb("admin:settings:service"),
+        )
+    except Exception:
+        pass
+    _audit(callback.from_user.id, "bot.restart", "")
+    mark_restart_requested()
+    try:
+        await dispatcher.stop_polling()
+    except Exception as exc:
+        cancel_restart_request()
+        try:
+            await callback.message.answer(
+                f"<b>⚠ Не удалось остановить бота</b>\n<code>{html.escape(str(exc)[:300])}</code>",
+                reply_markup=back_admin_kb("admin:settings:service"),
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "admin:section:team")
