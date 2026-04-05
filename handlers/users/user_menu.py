@@ -393,7 +393,7 @@ async def callback_profile(callback: CallbackQuery) -> None:
             f"   ⤷ код: <code>{ref_code}</code>",
         ]
         if ref_link:
-            ref_lines.append(f"   ⤷ ссылка: {ref_link}")
+            ref_lines.append(f"   ⤷ ссылка: <code>{ref_link}</code>")
         ref_lines.append("   ⤷ <i>после первого заказа приглашённого — бонусы вам обоим</i>")
     profile_text = ui_panel(
         emoji="👤",
