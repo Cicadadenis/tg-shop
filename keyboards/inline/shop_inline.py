@@ -308,6 +308,7 @@ def admin_section_insights_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📈 Статистика", callback_data="admin:stats"),
                 InlineKeyboardButton(text="👥 Клиенты · база", callback_data="admin:users:list:insights"),
             ],
+            [InlineKeyboardButton(text="📜 Журнал действий админов", callback_data="admin:audit:log")],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
         ]
     )
@@ -342,21 +343,86 @@ def admin_section_team_kb(*, can_manage_admins: bool = False) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_products_kb(products: list[dict]) -> InlineKeyboardMarkup:
+def admin_promo_wizard_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:promo:cancel")]]
+    )
+
+
+def admin_promo_kind_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Проценты (%)", callback_data="admin:promo:kind:percent"),
+                InlineKeyboardButton(text="💵 Фикс (грн)", callback_data="admin:promo:kind:fixed"),
+            ],
+            [InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:promo:cancel")],
+        ]
+    )
+
+
+def admin_promo_max_uses_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="∞ Без лимита", callback_data="admin:promo:max:inf")],
+            [InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:promo:cancel")],
+        ]
+    )
+
+
+def admin_promo_until_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Без срока", callback_data="admin:promo:until:skip")],
+            [InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:promo:cancel")],
+        ]
+    )
+
+
+def admin_promo_target_user_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Для всех клиентов", callback_data="admin:promo:user:skip")],
+            [InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:promo:cancel")],
+        ]
+    )
+
+
+def admin_product_edit_categories_kb(categories: list[dict]) -> InlineKeyboardMarkup:
+    """Шаг 1 редактирования товаров: выбор категории (как витрина / прайс)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for c in categories:
+        pair.append(
+            InlineKeyboardButton(text=c["name"], callback_data=f"admin:product:cat:{c['id']}")
+        )
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:catalog")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_products_in_category_kb(products: list[dict], category_id: int) -> InlineKeyboardMarkup:
+    """Шаг 2: товары выбранной категории."""
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{'✅' if product['stock'] > 0 else '❌'} {product['name']} · {product['price']} грн · {product['stock']} шт",
+                text=f"{'✅' if product['stock'] > 0 else '❌'} {product['name'][:36]} · {product['price']} грн · {product['stock']} шт",
                 callback_data=f"admin:product:view:{product['id']}",
             )
         ]
         for product in products
     ]
-    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:catalog")])
+    rows.append(
+        [InlineKeyboardButton(text="⬅ К категориям", callback_data="admin:product:list")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_product_actions_kb(product_id: int) -> InlineKeyboardMarkup:
+def admin_product_actions_kb(product_id: int, *, list_back: str = "admin:product:list") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -366,7 +432,7 @@ def admin_product_actions_kb(product_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📝 Описание", callback_data=f"admin:product:desc:{product_id}")],
             [InlineKeyboardButton(text="🖼 Фото", callback_data=f"admin:product:photo:{product_id}")],
             [InlineKeyboardButton(text="❌ Удалить", callback_data=f"admin:product:delete:{product_id}")],
-            [InlineKeyboardButton(text="⬅ Список", callback_data="admin:product:list")],
+            [InlineKeyboardButton(text="⬅ К списку товаров", callback_data=list_back)],
         ]
     )
 

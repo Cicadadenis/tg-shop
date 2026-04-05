@@ -45,7 +45,6 @@ def account_categories_inline_kb(categories: list[tuple]) -> InlineKeyboardMarku
 profile_actions_inline_kb = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="📦 Заказы · история покупок", callback_data="menu:orders")],
-        [InlineKeyboardButton(text="✏ Данные · ФИО и адрес", callback_data="profile:edit")],
         [InlineKeyboardButton(text="⬅ В меню · главный экран", callback_data="profile:back")],
     ]
 )
@@ -126,6 +125,7 @@ def admin_settings_inline_kb(
             [InlineKeyboardButton(text="🎨 Витрина · /start · главное меню", callback_data="admin:section:appearance")],
             [InlineKeyboardButton(text="🔔 Шаблоны · статусы · лог-чат", callback_data="admin:settings:notif")],
             [InlineKeyboardButton(text="🕐 Время работы", callback_data="admin:settings:business_hours")],
+            [InlineKeyboardButton(text="🤝 Пригласи друга", callback_data="admin:settings:referral")],
             [InlineKeyboardButton(text=f"🛠 Техработы {maint_ind}", callback_data="admin:maintenance:toggle")],
             [InlineKeyboardButton(text="🗂 Сервис · бэкап базы", callback_data="admin:settings:service")],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
@@ -140,6 +140,18 @@ def admin_business_hours_kb(*, enabled: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=f"{ind} Ограничение по времени", callback_data="admin:bhours:toggle")],
             [InlineKeyboardButton(text="🕐 Начало приёма", callback_data="admin:bhours:start")],
             [InlineKeyboardButton(text="🕙 Конец приёма", callback_data="admin:bhours:end")],
+            [InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")],
+        ]
+    )
+
+
+def admin_referral_kb(*, enabled: bool, inviter: int, referee: int) -> InlineKeyboardMarkup:
+    ind = "🟢 ВКЛ" if enabled else "🔴 ВЫКЛ"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{ind} Реферальная программа", callback_data="admin:referral:toggle")],
+            [InlineKeyboardButton(text=f"🎁 Бонус пригласившему: {inviter} грн", callback_data="admin:referral:inviter")],
+            [InlineKeyboardButton(text=f"🎁 Бонус новичку: {referee} грн", callback_data="admin:referral:referee")],
             [InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")],
         ]
     )
@@ -180,13 +192,14 @@ def admin_settings_payments_inline_kb(
     )
 
 
-def admin_settings_service_inline_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💾 Бэкап · скачать SQLite", callback_data="admin:db:backup")],
-            [InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")],
-        ]
-    )
+def admin_settings_service_inline_kb(*, can_update_repo: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="💾 Бэкап · скачать SQLite", callback_data="admin:db:backup")],
+    ]
+    if can_update_repo:
+        rows.append([InlineKeyboardButton(text="🔄 Обновить с Git", callback_data="admin:repo:update")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_text_menus_kb(menus: dict) -> InlineKeyboardMarkup:

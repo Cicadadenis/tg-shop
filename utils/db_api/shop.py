@@ -291,6 +291,19 @@ def init_shop_tables() -> None:
             """
         )
 
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_shop_admin_audit(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                actor_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        db.execute("CREATE INDEX IF NOT EXISTS idx_shop_admin_audit_created ON storage_shop_admin_audit(created_at)")
+
         if not _column_exists(db, "storage_shop_orders", "promo_code"):
             db.execute("ALTER TABLE storage_shop_orders ADD COLUMN promo_code TEXT NOT NULL DEFAULT ''")
 
@@ -798,10 +811,9 @@ def apply_referral_from_start_payload(telegram_id: int, start_arg: str) -> None:
 
 def apply_referral_bonuses_after_first_order(user_id: int) -> tuple[int, int]:
     """Начисляет бонусы при первом заказе по рефералке. Возвращает (бонус пригласившему, бонус новичку)."""
-    if get_shop_setting("referral_program_enabled", "1") != "1":
+    if not is_referral_program_enabled():
         return 0, 0
-    inviter_bonus = max(0, int(get_shop_setting("referral_bonus_inviter", "50") or 0))
-    referee_bonus = max(0, int(get_shop_setting("referral_bonus_referee", "25") or 0))
+    inviter_bonus, referee_bonus = get_referral_bonus_amounts()
     if inviter_bonus <= 0 and referee_bonus <= 0:
         return 0, 0
     with sqlite3.connect(path_to_db) as db:
@@ -829,6 +841,29 @@ def apply_referral_bonuses_after_first_order(user_id: int) -> tuple[int, int]:
         )
         db.commit()
     return inviter_bonus, referee_bonus
+
+
+def is_referral_program_enabled() -> bool:
+    return get_shop_setting("referral_program_enabled", "1") == "1"
+
+
+def set_referral_program_enabled(on: bool) -> None:
+    set_shop_setting("referral_program_enabled", "1" if on else "0")
+
+
+def get_referral_bonus_amounts() -> tuple[int, int]:
+    return (
+        max(0, int(get_shop_setting("referral_bonus_inviter", "50") or 0)),
+        max(0, int(get_shop_setting("referral_bonus_referee", "25") or 0)),
+    )
+
+
+def set_referral_bonus_inviter(amount: int) -> None:
+    set_shop_setting("referral_bonus_inviter", str(max(0, int(amount))))
+
+
+def set_referral_bonus_referee(amount: int) -> None:
+    set_shop_setting("referral_bonus_referee", str(max(0, int(amount))))
 
 
 def save_product_rating(order_id: str, user_id: int, product_id: int, rating: int, comment: str = "") -> bool:
@@ -1958,6 +1993,56 @@ def get_analytics_extended() -> dict[str, Any]:
         "top_views": [(str(t[0]), int(t[1])) for t in top_views],
         "orders_with_promo": int(promo_used or 0),
     }
+
+
+def log_admin_action(actor_id: int, action: str, details: str = "") -> None:
+    """Запись в журнал действий (админы / менеджеры). Ошибки БД глушим — не ломаем основной сценарий."""
+    try:
+        aid = int(actor_id)
+    except (TypeError, ValueError):
+        aid = 0
+    act = ((action or "").strip())[:200] or "?"
+    det = (details or "")[:2000]
+    try:
+        with sqlite3.connect(path_to_db) as db:
+            db.execute(
+                "INSERT INTO storage_shop_admin_audit(created_at, actor_id, action, details) VALUES (?, ?, ?, ?)",
+                (_now(), aid, act, det),
+            )
+            db.commit()
+    except Exception:
+        pass
+
+
+def count_admin_audit_log() -> int:
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute("SELECT COUNT(*) FROM storage_shop_admin_audit").fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def list_admin_audit_log(*, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+    limit = max(1, min(50, int(limit)))
+    offset = max(0, int(offset))
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            """
+            SELECT id, created_at, actor_id, action, details
+            FROM storage_shop_admin_audit
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return [
+        {
+            "id": int(r[0]),
+            "created_at": str(r[1] or ""),
+            "actor_id": int(r[2]),
+            "action": str(r[3] or ""),
+            "details": str(r[4] or ""),
+        }
+        for r in rows
+    ]
 
 
 def create_order_from_cart(

@@ -1,7 +1,10 @@
 from math import ceil
+import asyncio
 import datetime
+import html
 import io
 import json
+import os
 import re
 
 from aiogram import F, Router
@@ -29,7 +32,13 @@ from keyboards.inline.shop_inline import (
     admin_orders_menu_kb,
     admin_orders_kb,
     admin_product_actions_kb,
-    admin_products_kb,
+    admin_product_edit_categories_kb,
+    admin_products_in_category_kb,
+    admin_promo_kind_kb,
+    admin_promo_max_uses_kb,
+    admin_promo_target_user_kb,
+    admin_promo_until_kb,
+    admin_promo_wizard_cancel_kb,
     admin_shop_kb,
     admin_user_actions_kb,
     cart_kb,
@@ -61,6 +70,7 @@ from utils.db_api.shop import (
     change_cart_quantity,
     clear_cart,
     clear_user_applied_promo,
+    count_admin_audit_log,
     create_category,
     create_order_from_cart,
     create_product,
@@ -72,7 +82,6 @@ from utils.db_api.shop import (
     export_orders_csv,
     get_admin_ids,
     get_admin_new_order_template,
-    get_admin_products,
     get_all_user_ids_for_broadcast,
     get_analytics_extended,
     get_cart,
@@ -103,8 +112,11 @@ from utils.db_api.shop import (
     list_admin_users,
     list_categories,
     list_customer_users,
+    list_products,
     list_products_paginated,
     list_product_review_snippets,
+    log_admin_action,
+    list_admin_audit_log,
     list_promocodes,
     list_recent_views,
     promo_discount_for_user_cart,
@@ -165,6 +177,133 @@ init_shop_tables()
 
 PER_PAGE = 6
 REVIEWS_PER_PAGE = 5
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def _trim_text(value: str, limit: int = 1000) -> str:
+    value = (value or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
+
+
+async def _git_pull_project() -> tuple[bool, str]:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            PROJECT_ROOT,
+            "pull",
+            "--ff-only",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+    except FileNotFoundError:
+        return False, "Git не найден в системе. Установите Git и добавьте его в PATH."
+
+    output = (stdout or b"").decode("utf-8", errors="ignore").strip()
+    errors = (stderr or b"").decode("utf-8", errors="ignore").strip()
+    combined = "\n".join(chunk for chunk in (output, errors) if chunk).strip()
+    if process.returncode != 0:
+        details = html.escape(_trim_text(combined or "Неизвестная ошибка git pull", 1400))
+        return False, f"<b>❌ Обновление не выполнено</b>\n\n<code>{details}</code>"
+
+    normalized = combined.lower()
+    if "already up to date" in normalized:
+        return True, "<b>✅ Уже актуальная версия</b>\n\nИзменений в удалённом репозитории нет."
+
+    details = html.escape(_trim_text(combined or "Обновление выполнено", 1400))
+    return True, (
+        "<b>✅ Файлы обновлены из Git</b>\n\n"
+        f"<code>{details}</code>\n\n"
+        "<i>Если бот запущен как служба, перезапустите процесс для применения Python-изменений.</i>"
+    )
+
+
+def _admin_edit_back_markup(data: dict):
+    cid = int(data.get("edit_category_id") or 0)
+    return back_admin_kb(f"admin:product:cat:{cid}" if cid else "admin:product:list")
+
+
+def _audit(actor_id: int, action: str, details: str = "") -> None:
+    log_admin_action(actor_id, action, details)
+
+
+AUDIT_PAGE_SIZE = 15
+
+
+def _admin_audit_markup(page: int, total_records: int) -> InlineKeyboardMarkup:
+    if total_records <= 0:
+        pages = 1
+        page = 0
+    else:
+        pages = max(1, ceil(total_records / AUDIT_PAGE_SIZE))
+        page = max(0, min(page, pages - 1))
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅", callback_data=f"admin:audit:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="shop:noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="➡", callback_data=f"admin:audit:page:{page + 1}"))
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            nav,
+            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:insights")],
+        ]
+    )
+
+
+def _admin_audit_screen(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    total = count_admin_audit_log()
+    offset = page * AUDIT_PAGE_SIZE
+    rows = list_admin_audit_log(limit=AUDIT_PAGE_SIZE, offset=offset)
+    head = ui_panel(
+        emoji="📜",
+        title="Журнал действий",
+        intro="Кто и что менял: товары, категории, заказы, промокоды и др. Новые записи сверху.",
+        body_lines=[],
+    )
+    if not rows:
+        text = f"{head}\n\n<i>Пока пусто — записи появятся после действий администраторов.</i>"
+        return text, _admin_audit_markup(0, total)
+
+    lines: list[str] = []
+    for r in rows:
+        aid = r["actor_id"]
+        act = html.escape((r["action"] or "")[:120])
+        det = html.escape((r["details"] or "")[:220])
+        t = html.escape((r["created_at"] or "")[:19])
+        chunk = f"🕐 <code>{t}</code>\n👤 <code>{aid}</code> · <b>{act}</b>"
+        if det:
+            chunk += f"\n   <i>{det}</i>"
+        lines.append(chunk)
+    text = f"{head}\n\n" + "\n\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3980] + "\n\n<i>… обрезано — уменьшите размер страницы или откройте другую.</i>"
+    return text, _admin_audit_markup(page, total)
+
+
+async def _admin_promo_finish_reply(state: FSMContext, target: Message, *, actor_id: int) -> None:
+    data = await state.get_data()
+    ok, msg = create_promocode(
+        str(data.get("code") or ""),
+        str(data.get("kind") or ""),
+        int(data.get("value") or 0),
+        max_uses=int(data.get("max_uses", -1)),
+        valid_until=str(data.get("valid_until") or ""),
+        target_user_id=int(data.get("target_user_id") or 0),
+    )
+    await state.clear()
+    if not ok:
+        await target.answer(f"<b>❌ {msg}</b>", reply_markup=back_admin_kb("admin:promos"))
+    else:
+        code = str(data.get("code") or "")
+        kind = str(data.get("kind") or "")
+        val = int(data.get("value") or 0)
+        _audit(actor_id, "promo.create", f"{code} {kind} {val}")
+        await target.answer(f"<b>✅ {msg}</b>", reply_markup=back_admin_kb("admin:promos"))
+
 
 DELIVERY_NOVA = "Новая почта"
 DELIVERY_CITY = "По городу"
@@ -2036,6 +2175,8 @@ async def admin_optional_photo_skip(callback: CallbackQuery, state: FSMContext) 
             photo="",
             brand=data.get("brand", ""),
         )
+        nm = (data.get("name") or "")[:80]
+        _audit(callback.from_user.id, "product.create", f"id={product_id} {nm}")
         ok_text = f"<b>✅ Товар в каталоге</b>\n──────────────\n🆔 <code>{product_id}</code>"
         ok_kb = back_admin_kb("admin:product:list")
     else:
@@ -2301,6 +2442,29 @@ async def admin_section_io(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin:repo:update")
+async def admin_repo_update(callback: CallbackQuery) -> None:
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    await callback.answer("Запускаю обновление...")
+    await _safe_edit(
+        callback.message,
+        "<b>⏳ Обновляю проект из Git...</b>\n<i>Это может занять несколько секунд.</i>",
+        reply_markup=back_admin_kb("admin:settings:service"),
+    )
+
+    ok, result = await _git_pull_project()
+    await _safe_edit(
+        callback.message,
+        result,
+        reply_markup=back_admin_kb("admin:settings:service"),
+    )
+    if ok:
+        _audit(callback.from_user.id, "repo.update", "git pull --ff-only")
+
+
 @router.callback_query(F.data == "admin:section:team")
 async def admin_section_team(callback: CallbackQuery) -> None:
     if not _is_privileged(callback.from_user.id):
@@ -2349,6 +2513,7 @@ async def admin_delivery_toggle(callback: CallbackQuery) -> None:
     current = get_shop_setting(setting_key, "1")
     new_value = "0" if current == "1" else "1"
     set_shop_setting(setting_key, new_value)
+    _audit(callback.from_user.id, "settings.delivery", f"{key}={new_value}")
 
     ds = get_delivery_settings()
     await _safe_edit(
@@ -2369,6 +2534,11 @@ async def admin_catalog_export(callback: CallbackQuery) -> None:
 
     await callback.answer("⏳ Подготавливаю файл...")
     data = export_catalog()
+    _audit(
+        callback.from_user.id,
+        "catalog.export",
+        f"cat={len(data.get('categories', []))} items={sum(len(c.get('products', [])) for c in data.get('categories', []))}",
+    )
     raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     file = BufferedInputFile(raw, filename="catalog_export.json")
     await callback.message.answer_document(
@@ -2444,6 +2614,7 @@ async def admin_catalog_import_file(message: Message, state: FSMContext) -> None
         return
 
     await state.clear()
+    _audit(message.from_user.id, "catalog.import", f"categories={cats} products={prods}")
     await message.answer(
         f"<b>✅ Импорт готов</b>\n"
         "──────────────\n"
@@ -2512,7 +2683,7 @@ async def admin_category_add_finish(message: Message, state: FSMContext) -> None
         await state.clear()
         return
 
-    ok, text, _category_id = create_category((message.text or "").strip())
+    ok, text, cid = create_category((message.text or "").strip())
     if not ok:
         await message.answer(
             f"<b>⚠ Категория</b>\n──────────────\n{text}",
@@ -2521,6 +2692,8 @@ async def admin_category_add_finish(message: Message, state: FSMContext) -> None
         return
 
     await state.clear()
+    if cid is not None:
+        _audit(message.from_user.id, "category.create", f"id={cid}")
     await message.answer(
         f"<b>✅ Готово</b>\n──────────────\n{text}",
         reply_markup=back_admin_kb("admin:categories"),
@@ -2559,6 +2732,7 @@ async def admin_category_delete(callback: CallbackQuery) -> None:
         await callback.answer(text, show_alert=True)
         return
 
+    _audit(callback.from_user.id, "category.delete", f"id={category_id}")
     await _render_admin_categories(callback.message, callback.from_user.id)
     await callback.answer(text)
 
@@ -2651,6 +2825,8 @@ async def admin_add_photo(message: Message, state: FSMContext) -> None:
         photo=message.photo[-1].file_id,
         brand=data.get("brand", ""),
     )
+    nm = (data.get("name") or "")[:80]
+    _audit(message.from_user.id, "product.create", f"id={product_id} {nm}")
     await state.clear()
     await message.answer(
         f"<b>✅ Товар в каталоге</b>\n──────────────\n🆔 <code>{product_id}</code>",
@@ -2683,6 +2859,8 @@ async def admin_add_no_photo(message: Message, state: FSMContext) -> None:
         photo="",
         brand=data.get("brand", ""),
     )
+    nm = (data.get("name") or "")[:80]
+    _audit(message.from_user.id, "product.create", f"id={product_id} {nm}")
     await state.clear()
     await message.answer(
         f"<b>✅ Товар в каталоге</b>\n──────────────\n🆔 <code>{product_id}</code>",
@@ -2696,17 +2874,55 @@ async def admin_products(callback: CallbackQuery) -> None:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
-    products = get_admin_products()
-    if not products:
+    categories = list_categories()
+    if not categories:
         await _safe_edit(
             callback.message,
-            "<b>📦 Товары</b>\n──────────────\n<i>Пока пусто — добавьте из админки</i>",
+            "<b>📦 Товары</b>\n──────────────\n<i>Сначала создайте категорию в разделе «Категории».</i>",
             reply_markup=_admin_shop_markup(callback.from_user.id),
         )
         await callback.answer()
         return
 
-    await _safe_edit(callback.message, "📦 <b>Товары</b>", reply_markup=admin_products_kb(products))
+    await _safe_edit(
+        callback.message,
+        "📦 <b>Редактирование товара</b>\n──────────────\n<i>Выберите категорию (как в каталоге):</i>",
+        reply_markup=admin_product_edit_categories_kb(categories),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:product:cat:"))
+async def admin_products_in_category(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    raw = callback.data.split(":")[-1]
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    category_id = int(raw)
+    cats = list_categories()
+    cat = next((c for c in cats if c["id"] == category_id), None)
+    if not cat:
+        await callback.answer("Категория не найдена", show_alert=True)
+        return
+    products = list_products(category_id=category_id, only_available=False)
+    if not products:
+        await _safe_edit(
+            callback.message,
+            f"📦 <b>Товары</b>\n──────────────\n<i>Категория «{cat['name']}» — пока нет товаров.</i>",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅ К категориям", callback_data="admin:product:list")]]
+            ),
+        )
+        await callback.answer()
+        return
+    await _safe_edit(
+        callback.message,
+        f"📦 <b>Товары</b>\n──────────────\n<i>{cat['name']}</i>",
+        reply_markup=admin_products_in_category_kb(products, category_id),
+    )
     await callback.answer()
 
 
@@ -2726,19 +2942,25 @@ async def admin_product_view(callback: CallbackQuery) -> None:
         f"📂 Категория: <b>{product['category_name']}</b>\n\n"
         f"{product['description']}"
     )
-    await _safe_edit(callback.message, text, reply_markup=admin_product_actions_kb(product_id))
+    list_back = f"admin:product:cat:{product['category_id']}"
+    await _safe_edit(callback.message, text, reply_markup=admin_product_actions_kb(product_id, list_back=list_back))
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("admin:product:price:"))
 async def admin_edit_price_start(callback: CallbackQuery, state: FSMContext) -> None:
     product_id = int(callback.data.split(":")[-1])
+    product = get_product(product_id)
+    if not product:
+        await callback.answer("Товар не найден", show_alert=True)
+        return
+    cid = int(product["category_id"])
     await state.set_state(AdminEditProduct.price)
-    await state.update_data(edit_product_id=product_id)
+    await state.update_data(edit_product_id=product_id, edit_category_id=cid)
     await _safe_edit(
         callback.message,
         "<b>💰 Новая цена</b>\n──────────────\n<i>Гривны, целое число</i>",
-        reply_markup=back_admin_kb("admin:product:list"),
+        reply_markup=back_admin_kb(f"admin:product:cat:{cid}"),
     )
     await callback.answer()
 
@@ -2746,29 +2968,37 @@ async def admin_edit_price_start(callback: CallbackQuery, state: FSMContext) -> 
 @router.message(AdminEditProduct.price)
 async def admin_edit_price(message: Message, state: FSMContext) -> None:
     if not (message.text or "").isdigit():
+        data = await state.get_data()
         await message.answer(
             "<b>⚠ Нужно число</b>",
-            reply_markup=back_admin_kb("admin:product:list"),
+            reply_markup=_admin_edit_back_markup(data),
         )
         return
     data = await state.get_data()
-    update_product(int(data["edit_product_id"]), price=int(message.text))
+    pid = int(data["edit_product_id"])
+    update_product(pid, price=int(message.text))
+    _audit(message.from_user.id, "product.update.price", f"id={pid} → {message.text}")
     await state.clear()
     await message.answer(
         "<b>✅ Цена сохранена</b>",
-        reply_markup=back_admin_kb("admin:product:list"),
+        reply_markup=_admin_edit_back_markup(data),
     )
 
 
 @router.callback_query(F.data.startswith("admin:product:stock:"))
 async def admin_edit_stock_start(callback: CallbackQuery, state: FSMContext) -> None:
     product_id = int(callback.data.split(":")[-1])
+    product = get_product(product_id)
+    if not product:
+        await callback.answer("Товар не найден", show_alert=True)
+        return
+    cid = int(product["category_id"])
     await state.set_state(AdminEditProduct.stock)
-    await state.update_data(edit_product_id=product_id)
+    await state.update_data(edit_product_id=product_id, edit_category_id=cid)
     await _safe_edit(
         callback.message,
         "<b>📊 Новый остаток</b>\n──────────────\n<i>Штуки на складе</i>",
-        reply_markup=back_admin_kb("admin:product:list"),
+        reply_markup=back_admin_kb(f"admin:product:cat:{cid}"),
     )
     await callback.answer()
 
@@ -2776,12 +3006,17 @@ async def admin_edit_stock_start(callback: CallbackQuery, state: FSMContext) -> 
 @router.callback_query(F.data.startswith("admin:product:desc:"))
 async def admin_edit_desc_start(callback: CallbackQuery, state: FSMContext) -> None:
     product_id = int(callback.data.split(":")[-1])
+    product = get_product(product_id)
+    if not product:
+        await callback.answer("Товар не найден", show_alert=True)
+        return
+    cid = int(product["category_id"])
     await state.set_state(AdminEditProduct.description)
-    await state.update_data(edit_product_id=product_id)
+    await state.update_data(edit_product_id=product_id, edit_category_id=cid)
     await _safe_edit(
         callback.message,
         "<b>📝 Новое описание</b>\n──────────────\n<i>Текст карточки товара (HTML допускается)</i>",
-        reply_markup=back_admin_kb("admin:product:list"),
+        reply_markup=back_admin_kb(f"admin:product:cat:{cid}"),
     )
     await callback.answer()
 
@@ -2794,23 +3029,25 @@ async def admin_edit_description(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer(
             "<b>⚠ Пустой текст</b>",
-            reply_markup=back_admin_kb("admin:product:list"),
+            reply_markup=_admin_edit_back_markup(data),
         )
         return
     update_product(pid, description=text[:3500])
+    _audit(message.from_user.id, "product.update.description", f"id={pid}")
     await state.clear()
     await message.answer(
         "<b>✅ Описание сохранено</b>",
-        reply_markup=back_admin_kb("admin:product:list"),
+        reply_markup=_admin_edit_back_markup(data),
     )
 
 
 @router.message(AdminEditProduct.stock)
 async def admin_edit_stock(message: Message, state: FSMContext) -> None:
     if not (message.text or "").isdigit():
+        data = await state.get_data()
         await message.answer(
             "<b>⚠ Нужно число</b>",
-            reply_markup=back_admin_kb("admin:product:list"),
+            reply_markup=_admin_edit_back_markup(data),
         )
         return
     data = await state.get_data()
@@ -2819,10 +3056,11 @@ async def admin_edit_stock(message: Message, state: FSMContext) -> None:
     old_stock = int(old_product["stock"]) if old_product else 0
     new_stock = int(message.text)
     update_product(pid, stock=new_stock)
+    _audit(message.from_user.id, "product.update.stock", f"id={pid} → {new_stock}")
     await state.clear()
     await message.answer(
         "<b>✅ Остаток сохранён</b>",
-        reply_markup=back_admin_kb("admin:product:list"),
+        reply_markup=_admin_edit_back_markup(data),
     )
     new_product = get_product(pid)
     if old_stock <= 0 and new_product and int(new_product["stock"]) > 0:
@@ -2844,12 +3082,17 @@ async def admin_edit_stock(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("admin:product:photo:"))
 async def admin_edit_photo_start(callback: CallbackQuery, state: FSMContext) -> None:
     product_id = int(callback.data.split(":")[-1])
+    product = get_product(product_id)
+    if not product:
+        await callback.answer("Товар не найден", show_alert=True)
+        return
+    cid = int(product["category_id"])
     await state.set_state(AdminEditProduct.photo)
-    await state.update_data(edit_product_id=product_id)
+    await state.update_data(edit_product_id=product_id, edit_category_id=cid)
     await _safe_edit(
         callback.message,
         "<b>🖼 Новое фото</b>\n──────────────\n<i>Пришлите изображение</i>",
-        reply_markup=back_admin_kb("admin:section:catalog"),
+        reply_markup=back_admin_kb(f"admin:product:cat:{cid}"),
     )
     await callback.answer()
 
@@ -2857,23 +3100,50 @@ async def admin_edit_photo_start(callback: CallbackQuery, state: FSMContext) -> 
 @router.message(AdminEditProduct.photo, F.photo)
 async def admin_edit_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    update_product(int(data["edit_product_id"]), photo=message.photo[-1].file_id)
+    pid = int(data["edit_product_id"])
+    update_product(pid, photo=message.photo[-1].file_id)
+    _audit(message.from_user.id, "product.update.photo", f"id={pid}")
     await state.clear()
     await message.answer(
         "<b>✅ Фото обновлено</b>",
-        reply_markup=back_admin_kb("admin:section:catalog"),
+        reply_markup=_admin_edit_back_markup(data),
     )
 
 
 @router.callback_query(F.data.startswith("admin:product:delete:"))
 async def admin_delete_product(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
     product_id = int(callback.data.split(":")[-1])
+    product = get_product(product_id)
+    cid = int(product["category_id"]) if product else 0
     delete_product(product_id)
-    await _safe_edit(
-        callback.message,
-        "<b>🗑 Товар удалён</b>\n──────────────\n<i>Из каталога убран</i>",
-        reply_markup=_admin_shop_markup(callback.from_user.id),
-    )
+    _audit(callback.from_user.id, "product.delete", f"id={product_id}")
+    if cid:
+        products = list_products(category_id=cid, only_available=False)
+        cat = next((c for c in list_categories() if c["id"] == cid), None)
+        name = cat["name"] if cat else "Категория"
+        if products:
+            await _safe_edit(
+                callback.message,
+                f"<b>🗑 Товар удалён</b>\n──────────────\n<i>Остальные товары в «{name}»:</i>",
+                reply_markup=admin_products_in_category_kb(products, cid),
+            )
+        else:
+            await _safe_edit(
+                callback.message,
+                f"<b>🗑 Товар удалён</b>\n──────────────\n<i>В категории «{name}» больше нет товаров.</i>",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="⬅ К категориям", callback_data="admin:product:list")]]
+                ),
+            )
+    else:
+        await _safe_edit(
+            callback.message,
+            "<b>🗑 Товар удалён</b>\n──────────────\n<i>Из каталога убран</i>",
+            reply_markup=_admin_shop_markup(callback.from_user.id),
+        )
     await callback.answer()
 
 
@@ -2957,6 +3227,7 @@ async def admin_analytics(callback: CallbackQuery) -> None:
         return
 
     ax = get_analytics_extended()
+    n_audit = count_admin_audit_log()
     lines_sales = "\n".join(f"  ▸ {t[0]} · <b>{t[1]}</b> шт · <b>{t[2]}</b> грн" for t in ax["top_sales"]) or "  <i>— нет данных —</i>"
     lines_views = "\n".join(f"  ▸ {t[0]} · <b>{t[1]}</b> просм." for t in ax["top_views"]) or "  <i>— нет данных —</i>"
     text = ui_panel(
@@ -2971,9 +3242,19 @@ async def admin_analytics(callback: CallbackQuery) -> None:
             lines_views,
             "",
             f"🏷 <b>Заказов с промокодом (всего):</b> {ax['orders_with_promo']}",
+            f"📜 <b>Записей в журнале действий админов:</b> {n_audit}",
         ],
     )
-    await _safe_edit(callback.message, text, reply_markup=back_admin_kb("admin:section:insights"))
+    await _safe_edit(
+        callback.message,
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📜 Открыть журнал", callback_data="admin:audit:log")],
+                [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:insights")],
+            ]
+        ),
+    )
     await callback.answer()
 
 
@@ -2985,11 +3266,36 @@ async def admin_orders_export(callback: CallbackQuery) -> None:
 
     raw = export_orders_csv().encode("utf-8-sig")
     file = BufferedInputFile(raw, filename="orders_export.csv")
+    _audit(callback.from_user.id, "orders.export_csv", "")
     await callback.message.answer_document(
         file,
         caption="<b>📥 Экспорт заказов</b>\n<i>Разделитель ; для Excel</i>",
         reply_markup=back_admin_kb("admin:shop"),
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:audit:log")
+async def admin_audit_log(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    text, markup = _admin_audit_screen(0)
+    await _safe_edit(callback.message, text, reply_markup=markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:audit:page:"))
+async def admin_audit_page(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    try:
+        page = int(callback.data.split(":")[-1])
+    except ValueError:
+        page = 0
+    text, markup = _admin_audit_screen(page)
+    await _safe_edit(callback.message, text, reply_markup=markup)
     await callback.answer()
 
 
@@ -3011,6 +3317,7 @@ async def admin_promo_toggle(callback: CallbackQuery) -> None:
         return
     row_id = int(callback.data.split(":")[-1])
     toggle_promocode_id(row_id)
+    _audit(callback.from_user.id, "promo.toggle", f"id={row_id}")
     text, markup = _promos_admin_view()
     await _safe_edit(callback.message, text, reply_markup=markup)
     await callback.answer("Готово")
@@ -3023,6 +3330,7 @@ async def admin_promo_delete(callback: CallbackQuery) -> None:
         return
     row_id = int(callback.data.split(":")[-1])
     delete_promocode_id(row_id)
+    _audit(callback.from_user.id, "promo.delete", f"id={row_id}")
     text, markup = _promos_admin_view()
     await _safe_edit(callback.message, text, reply_markup=markup)
     await callback.answer("Удалено")
@@ -3034,75 +3342,206 @@ async def admin_promo_add_start(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
-    await state.set_state(AdminPromoCreate.line)
+    await state.set_state(AdminPromoCreate.code)
     await _safe_edit(
         callback.message,
         "<b>➕ Новый промокод</b>\n──────────────\n"
-        "Одной строкой, примеры:\n"
-        "<code>SALE10 percent 10</code>\n"
-        "<code>GIFT500 fixed 500 max:100</code>\n"
-        "<code>NY26 fixed 50 until:2026-12-31</code>\n"
-        "<code>VIP30 percent 30 user:123456789</code>\n\n"
-        "<i>percent — скидка %, fixed — грн; max — лимит активаций (−1 без лимита); until — срок ISO; user — Telegram ID клиента для персонального кода</i>",
-        reply_markup=back_admin_kb("admin:promos"),
+        "<b>Шаг 1/6.</b> Введите <b>код</b> — как его будет вводить клиент "
+        "<i>(латиница и цифры, до 40 символов).</i>\n\n"
+        "Дальше тип скидки и лимиты выберете <b>кнопками</b>, цифры — только там, где нужно.",
+        reply_markup=admin_promo_wizard_cancel_kb(),
     )
     await callback.answer()
 
 
-@router.message(AdminPromoCreate.line)
-async def admin_promo_add_finish(message: Message, state: FSMContext) -> None:
+@router.callback_query(F.data == "admin:promo:cancel")
+async def admin_promo_wizard_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_privileged(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    text, markup = _promos_admin_view()
+    await _safe_edit(callback.message, text, reply_markup=markup)
+    await callback.answer()
+
+
+@router.message(AdminPromoCreate.code)
+async def admin_promo_code(message: Message, state: FSMContext) -> None:
     if not _is_privileged(message.from_user.id):
         await state.clear()
         return
-
-    line = (message.text or "").strip()
-    parts = line.split()
-    if len(parts) < 3:
+    raw = (message.text or "").strip()
+    if not raw or len(raw) > 40:
         await message.answer(
-            "<b>⚠ Нужно минимум: КОД percent|fixed ЗНАЧЕНИЕ</b>",
-            reply_markup=back_admin_kb("admin:promos"),
+            "<b>⚠</b> Нужен непустой код, не длиннее 40 символов.",
+            reply_markup=admin_promo_wizard_cancel_kb(),
         )
         return
-    code, kind_raw, val_raw = parts[0], parts[1].lower(), parts[2]
-    if kind_raw not in {"percent", "fixed"} or not val_raw.isdigit():
-        await message.answer("<b>⚠ Тип: percent или fixed; значение — целое число</b>", reply_markup=back_admin_kb("admin:promos"))
-        return
-    max_uses = -1
-    valid_until = ""
-    target_user_id = 0
-    for extra in parts[3:]:
-        el = extra.lower()
-        if el.startswith("max:"):
-            try:
-                max_uses = int(extra.split(":", 1)[1])
-            except ValueError:
-                pass
-        elif el.startswith("until:"):
-            valid_until = extra.split(":", 1)[1].strip()
-        elif el.startswith("user:") or el.startswith("uid:"):
-            raw_user = extra.split(":", 1)[1].strip()
-            if raw_user.isdigit():
-                target_user_id = int(raw_user)
-            else:
-                await message.answer(
-                    "<b>⚠ user должен быть числовым Telegram ID, пример: user:123456789</b>",
-                    reply_markup=back_admin_kb("admin:promos"),
-                )
-                return
+    await state.update_data(code=raw)
+    await state.set_state(AdminPromoCreate.pick_kind)
+    await message.answer("<b>Шаг 2/6.</b> Выберите тип скидки:", reply_markup=admin_promo_kind_kb())
 
-    ok, msg = create_promocode(
-        code,
-        kind_raw,
-        int(val_raw),
-        max_uses=max_uses,
-        valid_until=valid_until,
-        target_user_id=target_user_id,
-    )
-    await state.clear()
-    if not ok:
-        await message.answer(f"<b>❌ {msg}</b>", reply_markup=back_admin_kb("admin:promos"))
+
+@router.message(AdminPromoCreate.pick_kind)
+async def admin_promo_pick_kind_hint(message: Message) -> None:
+    await message.answer("Выберите тип скидки кнопками выше или «Отмена».")
+
+
+@router.callback_query(StateFilter(AdminPromoCreate.pick_kind), F.data.startswith("admin:promo:kind:"))
+async def admin_promo_kind_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_privileged(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
         return
-    await message.answer(f"<b>✅ {msg}</b>", reply_markup=back_admin_kb("admin:promos"))
+    kind = callback.data.split(":")[-1]
+    if kind not in ("percent", "fixed"):
+        await callback.answer()
+        return
+    data = await state.get_data()
+    code = data.get("code") or ""
+    await state.update_data(kind=kind)
+    await state.set_state(AdminPromoCreate.value)
+    label = "проценты" if kind == "percent" else "фикс в грн"
+    hint = "от <b>1</b> до <b>90</b>" if kind == "percent" else "целое число <b>грн</b>"
+    await callback.message.edit_text(
+        f"<b>Шаг 3/6.</b> Код <code>{code}</code>, тип: <b>{label}</b>.\n\n"
+        f"Введите размер скидки — {hint}.",
+        reply_markup=admin_promo_wizard_cancel_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminPromoCreate.value)
+async def admin_promo_value(message: Message, state: FSMContext) -> None:
+    if not _is_privileged(message.from_user.id):
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("<b>⚠</b> Нужно одно целое число.", reply_markup=admin_promo_wizard_cancel_kb())
+        return
+    val = int(text)
+    data = await state.get_data()
+    kind = str(data.get("kind") or "")
+    if kind == "percent" and (val < 1 or val > 90):
+        await message.answer("<b>⚠</b> Для процентов — от 1 до 90.", reply_markup=admin_promo_wizard_cancel_kb())
+        return
+    if kind == "fixed" and val < 0:
+        await message.answer("<b>⚠</b> Сумма не может быть отрицательной.", reply_markup=admin_promo_wizard_cancel_kb())
+        return
+    await state.update_data(value=val)
+    await state.set_state(AdminPromoCreate.max_uses)
+    await message.answer(
+        "<b>Шаг 4/6.</b> Лимит активаций — сколько раз можно применить код.\n"
+        "<i>Введите число (например <code>100</code>) или нажмите «Без лимита».</i>",
+        reply_markup=admin_promo_max_uses_kb(),
+    )
+
+
+@router.callback_query(StateFilter(AdminPromoCreate.max_uses), F.data == "admin:promo:max:inf")
+async def admin_promo_max_inf(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_privileged(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.update_data(max_uses=-1)
+    await state.set_state(AdminPromoCreate.valid_until)
+    await callback.message.edit_text(
+        "<b>Шаг 5/6.</b> До какой даты действует?\n"
+        "<i>Формат <code>ГГГГ-ММ-ДД</code> (например <code>2026-12-31</code>) или «Без срока».</i>",
+        reply_markup=admin_promo_until_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminPromoCreate.max_uses)
+async def admin_promo_max_uses_msg(message: Message, state: FSMContext) -> None:
+    if not _is_privileged(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        n = int((message.text or "").strip())
+    except ValueError:
+        await message.answer(
+            "<b>⚠</b> Нужно целое число или кнопка «Без лимита».",
+            reply_markup=admin_promo_max_uses_kb(),
+        )
+        return
+    if n != -1 and n < 1:
+        await message.answer(
+            "<b>⚠</b> Укажите не меньше 1 или нажмите «Без лимита».",
+            reply_markup=admin_promo_max_uses_kb(),
+        )
+        return
+    await state.update_data(max_uses=n)
+    await state.set_state(AdminPromoCreate.valid_until)
+    await message.answer(
+        "<b>Шаг 5/6.</b> До какой даты действует?\n"
+        "<i>Формат <code>ГГГГ-ММ-ДД</code> или «Без срока».</i>",
+        reply_markup=admin_promo_until_kb(),
+    )
+
+
+@router.callback_query(StateFilter(AdminPromoCreate.valid_until), F.data == "admin:promo:until:skip")
+async def admin_promo_until_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_privileged(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.update_data(valid_until="")
+    await state.set_state(AdminPromoCreate.target_user)
+    await callback.message.edit_text(
+        "<b>Шаг 6/6.</b> Персональный промокод?\n"
+        "<i>Введите <b>Telegram ID</b> клиента (только цифры) или «Для всех клиентов».</i>",
+        reply_markup=admin_promo_target_user_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminPromoCreate.valid_until)
+async def admin_promo_until_msg(message: Message, state: FSMContext) -> None:
+    if not _is_privileged(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    try:
+        datetime.datetime.fromisoformat(raw)
+    except ValueError:
+        await message.answer(
+            "<b>⚠</b> Нужна дата в формате <code>ГГГГ-ММ-ДД</code>.",
+            reply_markup=admin_promo_until_kb(),
+        )
+        return
+    await state.update_data(valid_until=raw)
+    await state.set_state(AdminPromoCreate.target_user)
+    await message.answer(
+        "<b>Шаг 6/6.</b> Персональный промокод?\n"
+        "<i>Введите <b>Telegram ID</b> клиента или «Для всех клиентов».</i>",
+        reply_markup=admin_promo_target_user_kb(),
+    )
+
+
+@router.callback_query(StateFilter(AdminPromoCreate.target_user), F.data == "admin:promo:user:skip")
+async def admin_promo_user_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_privileged(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.update_data(target_user_id=0)
+    await _admin_promo_finish_reply(state, callback.message, actor_id=callback.from_user.id)
+    await callback.answer()
+
+
+@router.message(AdminPromoCreate.target_user)
+async def admin_promo_target_user_msg(message: Message, state: FSMContext) -> None:
+    if not _is_privileged(message.from_user.id):
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer(
+            "<b>⚠</b> Нужен числовой Telegram ID.",
+            reply_markup=admin_promo_target_user_kb(),
+        )
+        return
+    await state.update_data(target_user_id=int(text))
+    await _admin_promo_finish_reply(state, message, actor_id=message.from_user.id)
 
 
 @router.callback_query(F.data == "admin:orders:new")
@@ -3217,10 +3656,14 @@ async def admin_order_view(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("admin:order:status:"))
 async def admin_order_status(callback: CallbackQuery) -> None:
+    if not _is_privileged(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
     parts = callback.data.split(":")
     order_id = parts[3]
     status = parts[4]
     update_order_status(order_id, status)
+    _audit(callback.from_user.id, "order.status", f"{order_id} → {status}")
 
     order = get_order(order_id)
     items = get_order_items(order_id)
@@ -3355,6 +3798,8 @@ async def admin_order_receipt_review(callback: CallbackQuery) -> None:
     if new_status == "approved":
         update_order_status(order_id, "paid")
 
+    _audit(callback.from_user.id, "order.receipt", f"{order_id} {new_status}")
+
     order = get_order(order_id)
     if not order:
         await callback.answer("Заказ не найден", show_alert=True)
@@ -3470,6 +3915,7 @@ async def admin_add_admin_finish(message: Message, state: FSMContext) -> None:
 
     target_user_id = int(raw_value)
     add_admin_user(target_user_id)
+    _audit(message.from_user.id, "team.admin_add", f"user={target_user_id}")
     await state.clear()
     await message.answer(
         f"✅ Пользователь <code>{target_user_id}</code> теперь админ.",
@@ -3498,6 +3944,7 @@ async def admin_user_promote(callback: CallbackQuery) -> None:
 
     target_user_id = int(callback.data.split(":")[-1])
     add_admin_user(target_user_id)
+    _audit(callback.from_user.id, "team.promote_admin", f"user={target_user_id}")
     await _render_admin_user_card(callback.message, callback.from_user.id, target_user_id)
     await callback.answer("Права админа выданы")
 
@@ -3512,6 +3959,7 @@ async def admin_user_manager(callback: CallbackQuery) -> None:
     target_user_id = int(parts[3])
     source = parts[4] if len(parts) > 4 else ""
     set_user_role(target_user_id, "manager")
+    _audit(callback.from_user.id, "team.manager", f"user={target_user_id}")
     await _render_admin_user_card(callback.message, callback.from_user.id, target_user_id, source=source)
     await callback.answer("Назначен менеджером магазина")
 
@@ -3529,6 +3977,7 @@ async def admin_user_demote(callback: CallbackQuery) -> None:
         await callback.answer("Нельзя снять главного админа", show_alert=True)
         return
 
+    _audit(callback.from_user.id, "team.demote", f"user={target_user_id}")
     await _render_admin_user_card(callback.message, callback.from_user.id, target_user_id, source=source)
     await callback.answer("Админ снят")
 
@@ -3671,6 +4120,7 @@ async def admin_user_bonus_set(message: Message, state: FSMContext) -> None:
         return
 
     set_user_bonus(target_user_id, amount)
+    _audit(message.from_user.id, "user.bonus", f"user={target_user_id} amount={amount}")
     await state.clear()
 
     # Уведомляем пользователя о начислении/обновлении бонуса
@@ -3815,6 +4265,7 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
         except Exception:
             pass
     await state.clear()
+    _audit(message.from_user.id, "broadcast.sent", f"recipients={sent}")
     await message.answer(
         f"<b>✅ Рассылка готова</b>\n──────────────\n📨 Дошло до <b>{sent}</b> адресатов",
         reply_markup=back_admin_kb("admin:shop"),
@@ -3868,7 +4319,12 @@ async def admin_stats(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback.message,
         text,
-        reply_markup=back_admin_kb("admin:section:insights"),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📜 Журнал действий админов", callback_data="admin:audit:log")],
+                [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:insights")],
+            ]
+        ),
     )
     await callback.answer()
 

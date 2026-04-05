@@ -82,6 +82,11 @@ class AdminBusinessHours(StatesGroup):
     end_time = State()
 
 
+class AdminReferral(StatesGroup):
+    inviter_bonus = State()
+    referee_bonus = State()
+
+
 class AdminUsers(StatesGroup):
     add_admin_id = State()
     message_text = State()
@@ -116,4 +121,9 @@ class ReviewTextForm(StatesGroup):
 
 
 class AdminPromoCreate(StatesGroup):
-    line = State()
+    code = State()
+    pick_kind = State()
+    value = State()
+    max_uses = State()
+    valid_until = State()
+    target_user = State()

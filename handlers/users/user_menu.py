@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, Inli
 from data.config import adm, bot_description, get_default_menu_banner_path, username as bot_username
 from keyboards.inline.user_inline import (
     admin_business_hours_kb,
+    admin_referral_kb,
     admin_settings_inline_kb,
     admin_settings_notifications_inline_kb,
     admin_settings_payments_inline_kb,
@@ -25,7 +26,7 @@ from keyboards.inline.user_inline import (
     support_tickets_list_kb,
     support_ticket_view_kb,
 )
-from handlers.users.shop_state import AdminBusinessHours, AdminNotifications, AdminPayments, SupportDialog
+from handlers.users.shop_state import AdminBusinessHours, AdminNotifications, AdminPayments, AdminReferral, SupportDialog
 from utils.set_bot_commands import set_default_commands
 from utils.db_api.shop import get_user_profile as get_shop_user_profile
 from utils.db_api.shop import apply_referral_from_start_payload, ensure_user, get_or_create_referral_code
@@ -67,8 +68,13 @@ from utils.db_api.shop import (
     is_within_business_hours,
     set_business_hours_enabled,
     set_business_hours_time,
+    get_referral_bonus_amounts,
+    is_referral_program_enabled,
+    set_referral_program_enabled,
+    set_referral_bonus_inviter,
+    set_referral_bonus_referee,
 )
-from utils.db_api.sqlite import get_all_categoriesx, get_userx
+from utils.db_api.sqlite import get_all_categoriesx
 from utils.db_api.sqlite import path_to_db
 from utils.ui_sections import ui_panel, ui_screen
 
@@ -113,8 +119,24 @@ def _get_admin_settings_payments_kb() -> InlineKeyboardMarkup:
     )
 
 
-def _get_admin_settings_service_kb() -> InlineKeyboardMarkup:
-    return admin_settings_service_inline_kb()
+def _get_admin_settings_service_kb(viewer_id: int) -> InlineKeyboardMarkup:
+    return admin_settings_service_inline_kb(can_update_repo=is_owner_user(viewer_id))
+
+
+def _admin_referral_text() -> str:
+    en = is_referral_program_enabled()
+    inv, ref = get_referral_bonus_amounts()
+    st = "🟢 включена" if en else "🔴 выключена"
+    return ui_panel(
+        emoji="🤝",
+        title="Пригласи друга",
+        intro="Бонусы начисляются после первого оформленного заказа приглашённого пользователя.",
+        body_lines=[
+            f"📌 <b>Программа:</b> {st}",
+            f"   ⤷ пригласившему: <b>{inv} грн</b>",
+            f"   ⤷ новичку: <b>{ref} грн</b>",
+        ],
+    )
 
 
 def _admin_business_hours_text() -> str:
@@ -139,6 +161,9 @@ def _admin_settings_text() -> str:
     chat_id = get_notify_chat_id() or "не задан"
     st = "✅ включены" if is_user_status_notification_enabled() else "❌ выключены"
     maint = "🛠 <b>включены</b> (клиенты не в магазин)" if is_maintenance() else "✅ выключены"
+    ref_on = is_referral_program_enabled()
+    r_inv, r_new = get_referral_bonus_amounts()
+    ref_st = f"🟢 {r_inv}/{r_new} грн" if ref_on else "🔴 выкл"
     start_cmd = get_start_command_description()
     return ui_panel(
         emoji="⚙️",
@@ -150,11 +175,13 @@ def _admin_settings_text() -> str:
             f"   ⤷ 📬 авто-статус клиенту: <b>{st}</b>",
             f"   ⤷ ⌨️ меню /start: <b>{start_cmd}</b>",
             f"   ⤷ 📢 лог-чат заказов: <code>{chat_id}</code>",
+            f"   ⤷ 🤝 рефералка: <b>{ref_st}</b>",
             "",
             "🧭 <b>Разделы ниже</b>",
             "   ⤷ 🎨 <b>Оформление</b> · приветствие и главное меню",
             "   ⤷ 🔔 <b>Шаблоны</b> · тексты уведомлений и каналы",
             "   ⤷ 🕐 <b>Время работы</b> · поддержка и доставка по городу",
+            "   ⤷ 🤝 <b>Пригласи друга</b> · вкл/выкл и суммы бонусов",
             "   ⤷ 🛠 <b>Техработы</b> · витрина недоступна клиентам (админы ходят как обычно)",
             "   ⤷ 🗂 <b>Сервис</b> · резервная копия базы",
             "",
@@ -239,7 +266,7 @@ async def open_main_menu(message: Message, state: FSMContext) -> None:
     display_name = message.from_user.first_name or message.from_user.username or str(message.from_user.id)
     ensure_user(message.from_user.id, display_name)
     apply_referral_from_start_payload(message.from_user.id, start_arg)
-    if get_shop_setting("referral_program_enabled", "1") == "1":
+    if is_referral_program_enabled():
         get_or_create_referral_code(message.from_user.id)
     welcome_text, welcome_photo = get_welcome_message()
     if is_maintenance() and not _is_admin(message.from_user.id):
@@ -268,7 +295,7 @@ async def open_main_menu(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "menu:main")
 async def callback_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    if get_shop_setting("referral_program_enabled", "1") == "1":
+    if is_referral_program_enabled():
         get_or_create_referral_code(callback.from_user.id)
     main_menu_text, main_menu_photo = get_main_menu_message()
     kb = main_menu_inline_kb(is_admin=_is_admin(callback.from_user.id))
@@ -346,16 +373,12 @@ async def callback_profile(callback: CallbackQuery) -> None:
         callback.from_user.first_name or callback.from_user.username or str(callback.from_user.id),
     )
     profile = get_shop_user_profile(callback.from_user.id)
-    ref_enabled = get_shop_setting("referral_program_enabled", "1") == "1"
+    ref_enabled = is_referral_program_enabled()
     ref_code = get_or_create_referral_code(callback.from_user.id) if ref_enabled else ""
     uname = (bot_username or "").strip().lstrip("@")
     ref_link = f"https://t.me/{uname}?start=ref_{ref_code}" if ref_code and uname else ""
-    user = get_userx(user_id=callback.from_user.id)
     username = callback.from_user.first_name or callback.from_user.username or "не указан"
-    full_name = (profile.get("name") or "").strip() or "не заполнено"
-    reg_date = profile.get("created_at") or (user[6] if user and len(user) > 6 else "-")
-    phone = profile["phone"] if profile["phone"] else "не указан"
-    address = profile["address"] if profile["address"] else "не указан"
+    reg_date = profile.get("created_at") or "—"
     bonus = profile.get("bonus", 0)
     bonus_block = (
         [f"   ⤷ 🎁 бонусный счёт: <b>{bonus} грн</b>"]
@@ -371,20 +394,15 @@ async def callback_profile(callback: CallbackQuery) -> None:
         ]
         if ref_link:
             ref_lines.append(f"   ⤷ ссылка: {ref_link}")
-        ref_lines.append(
-            "   ⤷ <i>после первого заказа друга — бонусы вам обоим (если программа включена)</i>"
-        )
+        ref_lines.append("   ⤷ <i>после первого заказа приглашённого — бонусы вам обоим</i>")
     profile_text = ui_panel(
         emoji="👤",
         title="Личный кабинет",
-        intro="Данные для доставки и связи используются при оформлении заказа.",
+        intro="Краткая информация об аккаунте.",
         body_lines=[
             "📌 <b>Ваш профиль</b>",
             f"   ⤷ 🆔 Telegram ID: <code>{callback.from_user.id}</code>",
             f"   ⤷ 🔖 имя в Telegram: <b>{username}</b>",
-            f"   ⤷ 🙍 ФИО: <b>{full_name}</b>",
-            f"   ⤷ 📞 телефон: <b>{phone}</b>",
-            f"   ⤷ 📍 адрес: <b>{address}</b>",
             *bonus_block,
             f"   ⤷ 📅 регистрация: <b>{reg_date}</b>",
             *ref_lines,
@@ -984,9 +1002,10 @@ async def callback_admin_settings_service(callback: CallbackQuery) -> None:
             intro="Инструменты для обслуживания данных — используйте перед крупными изменениями.",
             groups=[
                 ("💾", "Бэкап базы", "Скачать копию SQLite одним файлом"),
+                ("🔄", "Обновить с Git", "Подтянуть изменения из репозитория (только владелец)"),
             ],
         ),
-        reply_markup=_get_admin_settings_service_kb(),
+        reply_markup=_get_admin_settings_service_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -1069,6 +1088,127 @@ async def callback_admin_bhours_cancel(callback: CallbackQuery, state: FSMContex
         reply_markup=admin_business_hours_kb(enabled=is_business_hours_restriction_enabled()),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:settings:referral")
+async def callback_admin_settings_referral(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    inv, ref = get_referral_bonus_amounts()
+    await _safe_edit(
+        callback.message,
+        _admin_referral_text(),
+        reply_markup=admin_referral_kb(enabled=is_referral_program_enabled(), inviter=inv, referee=ref),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:referral:toggle")
+async def callback_admin_referral_toggle(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    set_referral_program_enabled(not is_referral_program_enabled())
+    inv, ref = get_referral_bonus_amounts()
+    await _safe_edit(
+        callback.message,
+        _admin_referral_text(),
+        reply_markup=admin_referral_kb(enabled=is_referral_program_enabled(), inviter=inv, referee=ref),
+    )
+    await callback.answer("✅ Сохранено")
+
+
+@router.callback_query(F.data == "admin:referral:inviter")
+async def callback_admin_referral_inviter(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.set_state(AdminReferral.inviter_bonus)
+    inv, _ = get_referral_bonus_amounts()
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:referral:cancel")]]
+    )
+    await callback.message.answer(
+        f"🎁 <b>Бонус пригласившему</b>\n\n"
+        f"Сейчас: <b>{inv} грн</b>\n"
+        "Отправьте целое число (грн), <code>0</code> — не начислять.",
+        reply_markup=cancel_kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:referral:referee")
+async def callback_admin_referral_referee(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.set_state(AdminReferral.referee_bonus)
+    _, ref = get_referral_bonus_amounts()
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:referral:cancel")]]
+    )
+    await callback.message.answer(
+        f"🎁 <b>Бонус новичку</b>\n\n"
+        f"Сейчас: <b>{ref} грн</b>\n"
+        "Отправьте целое число (грн), <code>0</code> — не начислять.",
+        reply_markup=cancel_kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:referral:cancel")
+async def callback_admin_referral_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    inv, ref = get_referral_bonus_amounts()
+    await _safe_edit(
+        callback.message,
+        _admin_referral_text(),
+        reply_markup=admin_referral_kb(enabled=is_referral_program_enabled(), inviter=inv, referee=ref),
+    )
+    await callback.answer()
+
+
+@router.message(AdminReferral.inviter_bonus, F.text)
+async def admin_referral_inviter_save(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("⚠️ Нужно целое число ≥ 0")
+        return
+    set_referral_bonus_inviter(int(raw))
+    await state.clear()
+    await message.answer(
+        "✅ <b>Сохранено</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🤝 К реферальной программе", callback_data="admin:settings:referral")]]
+        ),
+    )
+
+
+@router.message(AdminReferral.referee_bonus, F.text)
+async def admin_referral_referee_save(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("⚠️ Нужно целое число ≥ 0")
+        return
+    set_referral_bonus_referee(int(raw))
+    await state.clear()
+    await message.answer(
+        "✅ <b>Сохранено</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🤝 К реферальной программе", callback_data="admin:settings:referral")]]
+        ),
+    )
 
 
 @router.message(AdminBusinessHours.start_time, F.text)
