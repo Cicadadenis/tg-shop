@@ -39,6 +39,7 @@ STATUS_MAP = {
     "shipped": "Отправлен",
     "done": "Доставлен",
     "cancel": "Отменен",
+    "deleted": "Удален",
 }
 
 
@@ -105,6 +106,10 @@ def init_shop_tables() -> None:
             )
             """
         )
+        if not _column_exists(db, "storage_shop_products", "low_stock_notified_stock"):
+            db.execute("ALTER TABLE storage_shop_products ADD COLUMN low_stock_notified_stock INTEGER NOT NULL DEFAULT -999")
+        if not _column_exists(db, "storage_shop_products", "low_stock_notified_at"):
+            db.execute("ALTER TABLE storage_shop_products ADD COLUMN low_stock_notified_at TEXT NOT NULL DEFAULT ''")
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS storage_shop_cart(
@@ -208,6 +213,10 @@ def init_shop_tables() -> None:
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_card_info', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_applepay_info', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_googlepay_info', '')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_crypto_info', '')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_crypto_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('cryptobot_token', '')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('low_stock_threshold', '3')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_cod_enabled', '1')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('support_admin_ids', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_nova_enabled', '1')")
@@ -304,6 +313,25 @@ def init_shop_tables() -> None:
         )
         db.execute("CREATE INDEX IF NOT EXISTS idx_shop_admin_audit_created ON storage_shop_admin_audit(created_at)")
 
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_shop_crypto_invoices(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                invoice_id INTEGER NOT NULL UNIQUE,
+                asset TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                pay_url TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                paid_at TEXT NOT NULL DEFAULT '',
+                raw_payload TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        db.execute("CREATE INDEX IF NOT EXISTS idx_shop_crypto_invoices_status ON storage_shop_crypto_invoices(status)")
+
         if not _column_exists(db, "storage_shop_orders", "promo_code"):
             db.execute("ALTER TABLE storage_shop_orders ADD COLUMN promo_code TEXT NOT NULL DEFAULT ''")
 
@@ -371,6 +399,67 @@ def set_shop_setting(key: str, value: str) -> None:
             (key, value),
         )
         db.commit()
+
+
+def get_cryptobot_token() -> str:
+    """Токен CryptoBot API для авто-счетов и авто-подтверждения оплат."""
+    return get_shop_setting("cryptobot_token", "").strip()
+
+
+def set_cryptobot_token(token: str) -> None:
+    set_shop_setting("cryptobot_token", (token or "").strip())
+
+
+def get_low_stock_threshold() -> int:
+    raw = get_shop_setting("low_stock_threshold", "3").strip()
+    try:
+        v = int(raw)
+    except ValueError:
+        v = 3
+    return max(0, min(10_000, v))
+
+
+def set_low_stock_threshold(value: int) -> None:
+    v = int(value)
+    v = max(0, min(10_000, v))
+    set_shop_setting("low_stock_threshold", str(v))
+
+
+def reset_low_stock_notified(product_id: int) -> None:
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            "UPDATE storage_shop_products SET low_stock_notified_stock = -999, low_stock_notified_at = '' WHERE id = ?",
+            (int(product_id),),
+        )
+        db.commit()
+
+
+def should_notify_low_stock(product_id: int, *, new_stock: int, threshold: int) -> bool:
+    """
+    True если нужно отправить уведомление (и мы атомарно фиксируем факт уведомления).
+    Сброс на -999, когда товар вновь выше порога, делается отдельным reset_low_stock_notified().
+    """
+    pid = int(product_id)
+    ns = int(new_stock)
+    thr = int(threshold)
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            "SELECT low_stock_notified_stock FROM storage_shop_products WHERE id = ?",
+            (pid,),
+        ).fetchone()
+        if not row:
+            return False
+        last = int(row[0]) if row[0] is not None else -999
+        if ns > thr:
+            return False
+        if last == ns:
+            return False
+        db.execute(
+            "UPDATE storage_shop_products SET low_stock_notified_stock = ?, low_stock_notified_at = ? WHERE id = ?",
+            (ns, _now(), pid),
+        )
+        db.commit()
+    return True
 
 
 def get_welcome_message() -> tuple[str, str]:
@@ -557,6 +646,7 @@ def get_payment_settings() -> dict[str, str]:
         "card": get_shop_setting("payment_card_info", "").strip(),
         "applepay": get_shop_setting("payment_applepay_info", "").strip(),
         "googlepay": get_shop_setting("payment_googlepay_info", "").strip(),
+        "crypto": get_shop_setting("payment_crypto_info", "").strip(),
     }
 
 
@@ -565,6 +655,7 @@ def set_payment_setting(method: str, value: str) -> None:
         "card": "payment_card_info",
         "applepay": "payment_applepay_info",
         "googlepay": "payment_googlepay_info",
+        "crypto": "payment_crypto_info",
     }
     key = mapping.get(method)
     if not key:
@@ -575,6 +666,8 @@ def set_payment_setting(method: str, value: str) -> None:
 def set_payment_enabled(method: str, enabled: bool) -> None:
     if method == "cod":
         set_shop_setting("payment_cod_enabled", "1" if enabled else "0")
+    if method == "crypto":
+        set_shop_setting("payment_crypto_enabled", "1" if enabled else "0")
 
 
 def get_payment_info(method: str) -> str:
@@ -587,12 +680,17 @@ def payment_label(method: str) -> str:
         "card": "Банковская карта",
         "applepay": "Apple Pay",
         "googlepay": "Google Pay",
+        "crypto": "CryptoBot",
     }.get(method, method)
 
 
 def is_payment_enabled(method: str) -> bool:
     if method == "cod":
         return get_shop_setting("payment_cod_enabled", "1") != "0"
+    if method == "crypto":
+        if not get_cryptobot_token():
+            return False
+        return get_shop_setting("payment_crypto_enabled", "1") != "0"
     return bool(get_payment_info(method))
 
 
@@ -2287,6 +2385,236 @@ def update_order_status(order_id: str, status: str) -> None:
         db.commit()
 
 
+# Способы оплаты с предоплатой (без наложенного) — ограничение по времени на оплату
+PREPAID_PAYMENT_LABELS = frozenset(
+    {
+        "Банковская карта",
+        "Apple Pay",
+        "Google Pay",
+        "CryptoBot",
+    }
+)
+
+
+def _parse_order_created_at(created_at: str) -> datetime.datetime | None:
+    s = (created_at or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(s.replace(" ", "T"))
+    except ValueError:
+        try:
+            return datetime.datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+
+def expire_stale_prepaid_orders(*, timeout_minutes: int = 30) -> int:
+    """
+    Заказы «Новый» с предоплатой старше timeout_minutes переводит в «Удален»,
+    возвращает товары на склад, откатывает used_count промокода, помечает crypto-invoice.
+    """
+    cutoff = datetime.datetime.now() - datetime.timedelta(minutes=max(1, int(timeout_minutes)))
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            """
+            SELECT id, payment, created_at, promo_code
+            FROM storage_shop_orders
+            WHERE status = 'Новый'
+              AND payment IN ('Банковская карта', 'Apple Pay', 'Google Pay', 'CryptoBot')
+            """,
+        ).fetchall()
+
+    expired_ids: list[str] = []
+    for row in rows:
+        oid, payment, created_at, promo_code = row[0], row[1], row[2], row[3]
+        if (payment or "") not in PREPAID_PAYMENT_LABELS:
+            continue
+        ts = _parse_order_created_at(str(created_at or ""))
+        if ts is None or ts > cutoff:
+            continue
+        expired_ids.append(str(oid))
+
+    if not expired_ids:
+        return 0
+
+    done = 0
+    for order_id in expired_ids:
+        try:
+            with sqlite3.connect(path_to_db) as db:
+                row = db.execute(
+                    "SELECT status FROM storage_shop_orders WHERE id = ?",
+                    (order_id,),
+                ).fetchone()
+                if not row or str(row[0] or "").strip() != "Новый":
+                    continue
+
+                items = db.execute(
+                    "SELECT product_id, quantity FROM storage_shop_order_items WHERE order_id = ?",
+                    (order_id,),
+                ).fetchall()
+                for pid, qty in items:
+                    if int(pid) > 0 and int(qty) > 0:
+                        db.execute(
+                            "UPDATE storage_shop_products SET stock = stock + ? WHERE id = ?",
+                            (int(qty), int(pid)),
+                        )
+
+                promo = db.execute(
+                    "SELECT promo_code FROM storage_shop_orders WHERE id = ?",
+                    (order_id,),
+                ).fetchone()
+                code = str((promo[0] if promo else "") or "").strip().upper()
+                if code:
+                    db.execute(
+                        """
+                        UPDATE storage_shop_promocodes
+                        SET used_count = used_count - 1
+                        WHERE upper(code) = ? AND used_count > 0
+                        """,
+                        (code,),
+                    )
+
+                db.execute(
+                    """
+                    UPDATE storage_shop_crypto_invoices
+                    SET status = 'expired'
+                    WHERE order_id = ? AND status = 'active'
+                    """,
+                    (order_id,),
+                )
+
+                db.execute(
+                    "UPDATE storage_shop_orders SET status = 'Удален' WHERE id = ?",
+                    (order_id,),
+                )
+                db.commit()
+                done += 1
+        except Exception:
+            continue
+
+    return done
+
+
+def upsert_crypto_invoice(
+    *,
+    order_id: str,
+    user_id: int,
+    invoice_id: int,
+    asset: str,
+    amount: str,
+    pay_url: str,
+) -> None:
+    with sqlite3.connect(path_to_db) as db:
+        db.execute(
+            """
+            INSERT INTO storage_shop_crypto_invoices(
+                order_id, user_id, invoice_id, asset, amount, pay_url, status, created_at, paid_at, raw_payload
+            ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, '', '')
+            ON CONFLICT(order_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                invoice_id = excluded.invoice_id,
+                asset = excluded.asset,
+                amount = excluded.amount,
+                pay_url = excluded.pay_url,
+                status = 'active',
+                created_at = excluded.created_at,
+                paid_at = '',
+                raw_payload = ''
+            """,
+            (
+                order_id,
+                int(user_id),
+                int(invoice_id),
+                (asset or "").strip().upper(),
+                str(amount or "").strip(),
+                str(pay_url or "").strip(),
+                _now(),
+            ),
+        )
+        db.commit()
+
+
+def get_crypto_invoice_by_order(order_id: str) -> dict[str, Any] | None:
+    oid = (order_id or "").strip()
+    if not oid:
+        return None
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            """
+            SELECT order_id, user_id, invoice_id, asset, amount, pay_url, status, created_at, paid_at
+            FROM storage_shop_crypto_invoices
+            WHERE order_id = ?
+            """,
+            (oid,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "order_id": str(row[0]),
+        "user_id": int(row[1]),
+        "invoice_id": int(row[2]),
+        "asset": str(row[3] or ""),
+        "amount": str(row[4] or ""),
+        "pay_url": str(row[5] or ""),
+        "status": str(row[6] or ""),
+        "created_at": str(row[7] or ""),
+        "paid_at": str(row[8] or ""),
+    }
+
+
+def list_pending_crypto_invoices(limit: int = 100) -> list[dict[str, Any]]:
+    lim = max(1, min(500, int(limit)))
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            """
+            SELECT order_id, user_id, invoice_id, asset, amount, pay_url, status, created_at, paid_at
+            FROM storage_shop_crypto_invoices
+            WHERE status = 'active'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (lim,),
+        ).fetchall()
+    return [
+        {
+            "order_id": str(r[0]),
+            "user_id": int(r[1]),
+            "invoice_id": int(r[2]),
+            "asset": str(r[3] or ""),
+            "amount": str(r[4] or ""),
+            "pay_url": str(r[5] or ""),
+            "status": str(r[6] or ""),
+            "created_at": str(r[7] or ""),
+            "paid_at": str(r[8] or ""),
+        }
+        for r in rows
+    ]
+
+
+def mark_crypto_invoice_paid(invoice_id: int, raw_payload: str = "") -> bool:
+    iid = int(invoice_id)
+    with sqlite3.connect(path_to_db) as db:
+        row = db.execute(
+            "SELECT status FROM storage_shop_crypto_invoices WHERE invoice_id = ?",
+            (iid,),
+        ).fetchone()
+        if not row:
+            return False
+        if str(row[0] or "").strip().lower() == "paid":
+            return False
+        db.execute(
+            """
+            UPDATE storage_shop_crypto_invoices
+            SET status = 'paid', paid_at = ?, raw_payload = ?
+            WHERE invoice_id = ?
+            """,
+            (_now(), (raw_payload or "")[:5000], iid),
+        )
+        db.commit()
+    return True
+
+
 def get_admin_products() -> list[dict[str, Any]]:
     return list_products(only_available=False)
 
@@ -2372,7 +2700,9 @@ def get_shop_stats() -> dict[str, int]:
         orders = db.execute("SELECT COUNT(*) FROM storage_shop_orders").fetchone()[0]
         orders_new = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status='Новый'").fetchone()[0]
         orders_inwork = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status IN ('Оплачен', 'Отправлен')").fetchone()[0]
-        orders_archive = db.execute("SELECT COUNT(*) FROM storage_shop_orders WHERE status IN ('Доставлен', 'Отменен')").fetchone()[0]
+        orders_archive = db.execute(
+            "SELECT COUNT(*) FROM storage_shop_orders WHERE status IN ('Доставлен', 'Отменен', 'Удален')"
+        ).fetchone()[0]
         revenue = db.execute("SELECT COALESCE(SUM(total_price),0) FROM storage_shop_orders").fetchone()[0]
     return {
         "products": int(products),

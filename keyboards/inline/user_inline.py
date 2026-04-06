@@ -126,6 +126,7 @@ def admin_settings_inline_kb(
             [InlineKeyboardButton(text="🔔 Шаблоны · статусы · лог-чат", callback_data="admin:settings:notif")],
             [InlineKeyboardButton(text="🕐 Время работы", callback_data="admin:settings:business_hours")],
             [InlineKeyboardButton(text="🤝 Пригласи друга", callback_data="admin:settings:referral")],
+            [InlineKeyboardButton(text="📦 Остатки · порог уведомлений", callback_data="admin:settings:stock_alerts")],
             [InlineKeyboardButton(text=f"🛠 Техработы {maint_ind}", callback_data="admin:maintenance:toggle")],
             [InlineKeyboardButton(text="🗂 Сервис · бэкап базы", callback_data="admin:settings:service")],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")],
@@ -176,20 +177,26 @@ def admin_settings_payments_inline_kb(
     card_enabled: bool = False,
     applepay_enabled: bool = False,
     googlepay_enabled: bool = False,
+    crypto_enabled: bool = False,
+    *,
+    can_manage_crypto_token: bool = False,
 ) -> InlineKeyboardMarkup:
     cod_indicator = "🟢" if cod_enabled else "🔴"
     card_indicator = "🟢" if card_enabled else "🔴"
     applepay_indicator = "🟢" if applepay_enabled else "🔴"
     googlepay_indicator = "🟢" if googlepay_enabled else "🔴"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=f"💵 Наложенный платеж {cod_indicator}", callback_data="admin:pay:cod:toggle")],
-            [InlineKeyboardButton(text=f"💳 Банковская карта {card_indicator}", callback_data="admin:pay:card")],
-            [InlineKeyboardButton(text=f"🍏 Apple Pay {applepay_indicator}", callback_data="admin:pay:applepay")],
-            [InlineKeyboardButton(text=f"▶ Google Pay {googlepay_indicator}", callback_data="admin:pay:googlepay")],
-            [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:payments")],
-        ]
-    )
+    crypto_indicator = "🟢" if crypto_enabled else "🔴"
+    rows = [
+        [InlineKeyboardButton(text=f"💵 Наложенный платеж {cod_indicator}", callback_data="admin:pay:cod:toggle")],
+        [InlineKeyboardButton(text=f"💳 Банковская карта {card_indicator}", callback_data="admin:pay:card")],
+        [InlineKeyboardButton(text=f"🍏 Apple Pay {applepay_indicator}", callback_data="admin:pay:applepay")],
+        [InlineKeyboardButton(text=f"▶ Google Pay {googlepay_indicator}", callback_data="admin:pay:googlepay")],
+        [InlineKeyboardButton(text=f"🪙 CryptoBot {crypto_indicator}", callback_data="admin:pay:crypto:toggle")],
+    ]
+    if can_manage_crypto_token:
+        rows.append([InlineKeyboardButton(text="🔑 CryptoBot API токен", callback_data="admin:pay:crypto_token")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:payments")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_settings_service_inline_kb(*, can_update_repo: bool = False) -> InlineKeyboardMarkup:

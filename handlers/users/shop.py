@@ -45,7 +45,7 @@ from keyboards.inline.shop_inline import (
     catalog_kb,
     categories_kb,
     checkout_bonus_kb,
-    checkout_city_payment_kb,
+    checkout_crypto_asset_kb,
     checkout_delivery_kb,
     checkout_payment_kb,
     orders_archive_kb,
@@ -120,6 +120,9 @@ from utils.db_api.shop import (
     list_admin_audit_log,
     list_promocodes,
     list_recent_views,
+    get_low_stock_threshold,
+    reset_low_stock_notified,
+    should_notify_low_stock,
     promo_discount_for_user_cart,
     render_template,
     remove_admin_user,
@@ -154,6 +157,8 @@ from utils.db_api.shop import (
     set_main_menu_message,
 )
 from utils.bot_restart import cancel_restart_request, mark_restart_requested
+from utils.cryptobot_payments import create_cryptobot_invoice_for_order
+from utils.crypto_rates import CRYPTOBOT_ALLOWED_ASSETS
 from utils.ui_sections import ui_panel, ui_screen
 from .shop_state import (
     AdminAddProduct,
@@ -328,11 +333,23 @@ PAYMENT_MAP = {
     "card": "Банковская карта",
     "applepay": "Apple Pay",
     "googlepay": "Google Pay",
+    "crypto": "CryptoBot",
 }
 
-PREPAID_METHODS = {"card", "applepay", "googlepay"}
+PREPAID_METHODS = {"card", "applepay", "googlepay", "crypto"}
 
 _CHECKOUT_LIKE_FSM = ("CheckoutForm", "OrderReceiptForm", "SearchForm", "CartPromoForm", "ReviewTextForm")
+
+
+def _checkout_success_kb(order_id: str, *, can_send_receipt: bool, pay_url: str = "") -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if pay_url:
+        rows.append([InlineKeyboardButton(text="💸 Оплатить через CryptoBot", url=pay_url)])
+    if can_send_receipt:
+        rows.append([InlineKeyboardButton(text="🧾 Отправить чек", callback_data=f"shop:receipt:start:{order_id}")])
+    rows.append([InlineKeyboardButton(text="📦 Открыть заказ", callback_data=f"shop:order:{order_id}")])
+    rows.append([InlineKeyboardButton(text="⬅ К заказам", callback_data="menu:orders")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _clear_fsm_if_order_flow(state: FSMContext) -> None:
@@ -354,6 +371,52 @@ def _is_owner(user_id: int) -> bool:
 def _is_privileged(user_id: int) -> bool:
     return is_privileged_admin(user_id)
 
+
+async def _notify_low_stock(bot, product_id: int, *, old_stock: int | None = None) -> None:
+    try:
+        product = get_product(int(product_id))
+    except Exception:
+        product = None
+    if not product:
+        return
+
+    stock = int(product.get("stock") or 0)
+    thr = int(get_low_stock_threshold())
+
+    # reset "notified" marker when replenished above threshold
+    if stock > thr:
+        try:
+            reset_low_stock_notified(int(product_id))
+        except Exception:
+            pass
+        return
+
+    if not should_notify_low_stock(int(product_id), new_stock=stock, threshold=thr):
+        return
+
+    name = html.escape(str(product.get("name") or "Товар")[:80])
+    cat = html.escape(str(product.get("category_name") or "")[:60])
+    extra = f" (было {old_stock})" if old_stock is not None else ""
+    text = (
+        "<b>⚠ Низкий остаток</b>\n"
+        "──────────────\n"
+        f"📦 <b>{name}</b>\n"
+        + (f"📂 <i>{cat}</i>\n" if cat else "")
+        + f"🆔 <code>{product_id}</code>\n"
+        f"📊 Осталось: <b>{stock}</b> шт (порог: <b>{thr}</b>){extra}"
+    )
+
+    for admin_id in get_admin_ids():
+        try:
+            await bot.send_message(int(admin_id), text)
+        except Exception:
+            pass
+    notify_chat_id = get_notify_chat_id()
+    if notify_chat_id:
+        try:
+            await bot.send_message(int(notify_chat_id), text)
+        except Exception:
+            pass
 
 def _admin_shop_markup(viewer_id: int):
     return admin_shop_kb(_is_owner(viewer_id), full_access=_is_privileged(viewer_id))
@@ -398,6 +461,25 @@ def _role_label(role: str) -> str:
     }.get(role, role)
 
 
+def _available_payment_methods() -> list[tuple[str, str]]:
+    methods: list[tuple[str, str]] = []
+    if is_payment_enabled("cod"):
+        methods.append(("cod", PAYMENT_MAP["cod"]))
+    for code in ("card", "applepay", "googlepay", "crypto"):
+        if is_payment_enabled(code):
+            methods.append((code, PAYMENT_MAP[code]))
+    return methods
+
+
+def _city_delivery_payment_methods() -> list[tuple[str, str]]:
+    """Доставка по городу — без наложенного платежа, только предоплата."""
+    methods: list[tuple[str, str]] = []
+    for code in ("card", "applepay", "googlepay", "crypto"):
+        if is_payment_enabled(code):
+            methods.append((code, PAYMENT_MAP[code]))
+    return methods
+
+
 def _cart_summary(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     items = get_cart(user_id)
     lines = [
@@ -426,17 +508,8 @@ def _cart_summary(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         + promo_block
         + "\n\n<i>Чтобы применить скидку, нажмите «🏷 Промокод» и отправьте код.</i>"
     )
-    return text, cart_kb(items, has_promo=applied)
-
-
-def _available_payment_methods() -> list[tuple[str, str]]:
-    methods: list[tuple[str, str]] = []
-    if is_payment_enabled("cod"):
-        methods.append(("cod", PAYMENT_MAP["cod"]))
-    for code in ("card", "applepay", "googlepay"):
-        if get_payment_info(code):
-            methods.append((code, PAYMENT_MAP[code]))
-    return methods
+    can_checkout = bool(_available_payment_methods())
+    return text, cart_kb(items, has_promo=applied, can_checkout=can_checkout)
 
 
 def _payment_instruction_text(method: str) -> str:
@@ -506,6 +579,24 @@ def _receipt_status_text(order: dict) -> str:
     if status == "rejected":
         return "отклонен"
     return "на проверке"
+
+
+def _admin_order_caption(order_id: str, order: dict, items: list[dict]) -> str:
+    lines = [f"• {item['title']} — {item['quantity']} x {item['price']} грн" for item in items]
+    promo_line = f"🏷 Промокод: <b>{order['promo_code']}</b>\n" if order.get("promo_code") else ""
+    return (
+        f"<b>📦 Заказ {order_id}</b>\n"
+        f"📌 Статус: <b>{order['status']}</b>\n"
+        f"👤 Клиент: <b>{order['name']}</b>\n"
+        f"📞 Телефон: <b>{order['phone']}</b>\n"
+        f"📍 Адрес: <b>{order['address']}</b>\n"
+        f"🚚 Доставка: <b>{order['delivery']}</b>\n"
+        f"💳 Оплата: <b>{order['payment']}</b>\n"
+        f"🧾 Чек: <b>{_receipt_status_text(order)}</b>\n"
+        f"{promo_line}"
+        f"💰 Итого: <b>{order['total']} грн</b>\n\n"
+        f"{chr(10).join(lines)}"
+    )
 
 
 def _filter_orders_by_receipt(orders: list[dict], flt: str) -> tuple[list[dict], str]:
@@ -1120,12 +1211,28 @@ async def recent_views_show(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "shop:checkout:blocked")
+async def checkout_blocked(callback: CallbackQuery) -> None:
+    if await _check_maintenance(callback):
+        return
+    await callback.answer(
+        "Нет доступных способов оплаты. Оформление заказа недоступно.",
+        show_alert=True,
+    )
+
+
 @router.callback_query(F.data == "shop:checkout:start")
 async def checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
     if await _check_maintenance(callback):
         return
     if not get_cart(callback.from_user.id):
         await callback.answer("Корзина пустая", show_alert=True)
+        return
+    if not _available_payment_methods():
+        await callback.answer(
+            "Нет доступных способов оплаты. Оформление заказа недоступно.",
+            show_alert=True,
+        )
         return
 
     await state.set_state(CheckoutForm.delivery_method)
@@ -1135,7 +1242,11 @@ async def checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
         "<b>🧾 Оформление заказа</b>\n"
         "──────────────\n"
         "Шаг 1/3 • <i>Выберите способ доставки</i>",
-        reply_markup=checkout_delivery_kb(nova=ds["nova"], city=ds["city"], pickup=ds["pickup"]),
+        reply_markup=checkout_delivery_kb(
+            nova=ds["nova"],
+            city=bool(ds["city"]) and bool(_city_delivery_payment_methods()),
+            pickup=ds["pickup"],
+        ),
     )
     await callback.answer()
 
@@ -1244,9 +1355,18 @@ async def checkout_city_recip_phone(message: Message, state: FSMContext) -> None
         return
     await state.update_data(checkout_phone=phone)
     await state.set_state(CheckoutForm.payment)
+    city_pay = _city_delivery_payment_methods()
+    if not city_pay:
+        await state.clear()
+        await message.answer(
+            "<b>⚠️ Нет способов предоплаты</b>\n"
+            "Для доставки по городу нужна предоплата (карта, Apple/Google Pay или CryptoBot).",
+            reply_markup=back_menu_kb("menu:cart"),
+        )
+        return
     await message.answer(
-        "<b>💳 Оплата</b>\n──────────────\n<i>По городу — только карта</i>",
-        reply_markup=checkout_city_payment_kb(),
+        "<b>💳 Оплата</b>\n──────────────\n<i>По городу — только предоплата (без наложенного платежа)</i>",
+        reply_markup=checkout_payment_kb(city_pay),
     )
 
 
@@ -1361,6 +1481,9 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
     if not payment:
         await callback.answer("Неизвестный тип оплаты", show_alert=True)
         return
+    if not is_payment_enabled(key):
+        await callback.answer("Этот способ оплаты недоступен.", show_alert=True)
+        return
 
     data = await state.get_data()
     delivery_key = str(data.get("checkout_delivery_key") or "")
@@ -1373,9 +1496,8 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
         )
         return
 
-    # Для доставки "По городу" разрешаем только оплату картой.
-    if delivery_key == "city" and key != "card":
-        await callback.answer("Для доставки по городу доступна только оплата картой", show_alert=True)
+    if delivery_key == "city" and key == "cod":
+        await callback.answer("Для доставки по городу доступна только предоплата.", show_alert=True)
         return
 
     if delivery_key == "city":
@@ -1403,12 +1525,26 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Не хватает данных получателя. Заполните данные и повторите.", show_alert=True)
         return
 
-    # Сохраняем всё нужное для создания заказа и проверяем бонус
     uid = callback.from_user.id
     promo_off_chk, promo_err_chk, promo_code_chk = promo_discount_for_user_cart(uid)
     if promo_code_chk and promo_err_chk:
         clear_user_applied_promo(uid)
         await callback.answer(promo_err_chk, show_alert=True)
+        return
+
+    if key == "crypto":
+        await state.update_data(
+            checkout_full_name=full_name,
+            checkout_phone=phone,
+            checkout_delivery_address=delivery_address,
+        )
+        await state.set_state(CheckoutForm.crypto_asset)
+        await _safe_edit(
+            callback.message,
+            "<b>🪙 CryptoBot</b>\n──────────────\n<i>Выберите валюту оплаты:</i>",
+            reply_markup=checkout_crypto_asset_kb(),
+        )
+        await callback.answer()
         return
 
     bonus = get_user_bonus(uid)
@@ -1418,6 +1554,78 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext) -> None:
         checkout_full_name=full_name,
         checkout_phone=phone,
         checkout_delivery_address=delivery_address,
+    )
+
+    if bonus > 0:
+        cart_sum = cart_total(uid)
+        pr_off, _, _ = promo_discount_for_user_cart(uid)
+        after_promo = max(1, cart_sum - pr_off)
+        max_bonus_to_apply = max(0, after_promo - 1)
+        bonus_to_apply = min(bonus, max_bonus_to_apply)
+
+        if bonus_to_apply > 0:
+            promo_line = ""
+            if pr_off > 0:
+                promo_line = f"🏷 Скидка по промокоду: <b>−{pr_off} грн</b>\n"
+            await state.set_state(CheckoutForm.bonus_confirm)
+            await _safe_edit(
+                callback.message,
+                f"🎁 У вас есть бонус: <b>{bonus} грн</b>\n"
+                f"Сумма корзины: <b>{cart_sum} грн</b>\n"
+                f"{promo_line}"
+                f"К оплате (до бонуса): <b>{after_promo} грн</b>\n"
+                f"Будет применено: <b>{bonus_to_apply} грн</b>\n"
+                f"Итого к оплате: <b>{after_promo - bonus_to_apply} грн</b>\n\n"
+                "Использовать бонус?",
+                reply_markup=checkout_bonus_kb(bonus_to_apply),
+            )
+            await callback.answer()
+            return
+
+    await _finalize_checkout(callback, state, use_bonus=False)
+
+
+@router.callback_query(CheckoutForm.crypto_asset, F.data.startswith("shop:crypto:asset:"))
+async def checkout_crypto_asset_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    part = (callback.data or "").split(":")[-1]
+    if part == "back":
+        await state.set_state(CheckoutForm.payment)
+        await _safe_edit(
+            callback.message,
+            "<b>💳 Оплата</b>\n──────────────\n<i>Выберите способ</i>",
+            reply_markup=checkout_payment_kb(_available_payment_methods()),
+        )
+        await callback.answer()
+        return
+
+    asset = part.strip().upper()
+    if asset not in CRYPTOBOT_ALLOWED_ASSETS:
+        await callback.answer("Выберите валюту из списка", show_alert=True)
+        return
+
+    data = await state.get_data()
+    delivery_key = str(data.get("checkout_delivery_key") or "")
+
+    if delivery_key == "city" and not is_within_business_hours():
+        hs, he = get_business_hours_bounds()
+        await callback.answer(
+            f"Доставка по городу недоступна вне {hs}–{he}. Оформите позже или выберите другой способ доставки.",
+            show_alert=True,
+        )
+        return
+
+    uid = callback.from_user.id
+    promo_off_chk, promo_err_chk, promo_code_chk = promo_discount_for_user_cart(uid)
+    if promo_code_chk and promo_err_chk:
+        clear_user_applied_promo(uid)
+        await callback.answer(promo_err_chk, show_alert=True)
+        return
+
+    bonus = get_user_bonus(uid)
+    await state.update_data(
+        checkout_payment_key="crypto",
+        checkout_payment=PAYMENT_MAP["crypto"],
+        checkout_crypto_asset=asset,
     )
 
     if bonus > 0:
@@ -1469,6 +1677,13 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
         )
         return
 
+    cart_items_snapshot = get_cart(user_id)
+    pids_snapshot = []
+    try:
+        pids_snapshot = [int(i.get("product_id") or 0) for i in cart_items_snapshot if int(i.get("product_id") or 0) > 0]
+    except Exception:
+        pids_snapshot = []
+
     cart_sum = cart_total(user_id)
     promo_off, promo_err, promo_code = promo_discount_for_user_cart(user_id)
     if promo_code and promo_err:
@@ -1506,7 +1721,10 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
         set_user_bonus(user_id, available_bonus - applied_bonus)
 
     order = get_order(payload)
-    if order:
+    # low stock notifications after checkout (stocks already decreased in DB)
+    for pid in set(pids_snapshot):
+        await _notify_low_stock(callback.bot, pid)
+    if order and delivery == DELIVERY_NOVA:
         admin_message = render_template(
             get_admin_new_order_template(),
             {
@@ -1551,7 +1769,35 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
                 pass
 
     payment_info = _payment_instruction_text(key)
-    can_send_receipt = key in PREPAID_METHODS
+    pay_url = ""
+    if order and key == "crypto":
+        ca = str(data.get("checkout_crypto_asset") or "USDT").strip().upper()
+        if ca not in CRYPTOBOT_ALLOWED_ASSETS:
+            ca = "USDT"
+        ok_invoice, pay_or_error, asset, crypto_amt, rate, src = await create_cryptobot_invoice_for_order(
+            order_id=payload,
+            user_id=user_id,
+            total_amount=int(order["total"]),
+            description=f"Оплата заказа {payload}",
+            asset=ca,
+        )
+        if ok_invoice:
+            pay_url = pay_or_error
+            payment_info += (
+                f"\n\n<b>Счёт создан в CryptoBot</b>\n"
+                f"Сумма заказа: <b>{order['total']} грн</b> → к оплате: <b>{crypto_amt} {asset}</b>\n"
+                f"<i>Курс: {rate:g} грн за 1 {asset} ({src}).</i>\n"
+                "Нажмите кнопку ниже, чтобы оплатить."
+            )
+        else:
+            payment_info += (
+                "\n\n<b>⚠ Не удалось создать счёт CryptoBot автоматически.</b>\n"
+                f"Причина: <i>{html.escape(pay_or_error)}</i>\n"
+                "Свяжитесь с администратором."
+            )
+
+    # Чек вручную не нужен: оплата подтверждается через CryptoBot API.
+    can_send_receipt = key in PREPAID_METHODS and key != "crypto"
     bonus_line = f"\n🎁 Бонус применён: <b>-{applied_bonus} грн</b>" if use_bonus and applied_bonus > 0 else ""
     promo_line_ok = ""
     if order and order.get("promo_code"):
@@ -1562,7 +1808,7 @@ async def _finalize_checkout(callback: CallbackQuery, state: FSMContext, *, use_
         f"✅ <b>Заказ оформлен</b>\n"
         "──────────────\n"
         f"📋 Номер: <code>{payload}</code>{total_line}{promo_line_ok}{bonus_line}{payment_info}",
-        reply_markup=order_detail_kb(payload, back_target="menu:orders", can_send_receipt=can_send_receipt),
+        reply_markup=_checkout_success_kb(payload, can_send_receipt=can_send_receipt, pay_url=pay_url),
     )
     await callback.answer("✅ Готово!")
 
@@ -1661,7 +1907,48 @@ async def review_text_save(message: Message, state: FSMContext) -> None:
 
 _NEW_STATUSES = {"Новый"}
 _INWORK_STATUSES = {"Оплачен", "Отправлен"}
-_ARCHIVE_STATUSES = {"Доставлен", "Отменен"}
+_ARCHIVE_STATUSES = {"Доставлен", "Отменен", "Удален"}
+
+
+async def _send_delivery_survey_after_delay(
+    bot,
+    *,
+    order_id: str,
+    user_id: int,
+    items: list[dict],
+    delay_seconds: int = 60 * 60,
+) -> None:
+    """Отправляет опрос по товарам спустя заданную задержку после доставки."""
+    try:
+        await asyncio.sleep(max(0, int(delay_seconds)))
+        order = get_order(order_id)
+        if not order or order.get("status_raw", "").strip() != "Доставлен":
+            return
+
+        for item in items:
+            pid = int(item.get("product_id") or 0)
+            if pid <= 0:
+                continue
+            product = get_product(pid)
+            caption = f"⭐ Оцените качество продукта\n<b>{item.get('title', 'Товар')}</b>"
+            try:
+                if product and product.get("photo"):
+                    await bot.send_photo(
+                        user_id,
+                        photo=product["photo"],
+                        caption=caption,
+                        reply_markup=product_survey_kb(order_id, pid),
+                    )
+                else:
+                    await bot.send_message(
+                        user_id,
+                        caption,
+                        reply_markup=product_survey_kb(order_id, pid),
+                    )
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "menu:orders")
@@ -1818,8 +2105,11 @@ async def order_open(callback: CallbackQuery) -> None:
         )
         raw = order.get("status_raw", "")
         receipt_review = str(order.get("receipt_review_status", "")).strip().lower()
-        can_send_receipt = _is_prepay_payment(order.get("payment", "")) and (
-            not order.get("receipt_sent", False) or receipt_review == "rejected"
+        pay_lbl = order.get("payment", "")
+        can_send_receipt = (
+            _is_prepay_payment(pay_lbl)
+            and pay_lbl != PAYMENT_MAP["crypto"]
+            and (not order.get("receipt_sent", False) or receipt_review == "rejected")
         )
         kb = order_detail_kb(order_id, back_target=_order_back_target(raw), can_send_receipt=can_send_receipt)
     await _safe_edit(callback.message, text, reply_markup=kb)
@@ -1832,6 +2122,9 @@ async def order_receipt_start(callback: CallbackQuery, state: FSMContext) -> Non
     order = get_order(order_id)
     if not order or int(order["user_id"]) != int(callback.from_user.id):
         await callback.answer("Заказ не найден", show_alert=True)
+        return
+    if (order.get("payment") or "").strip() == PAYMENT_MAP["crypto"]:
+        await callback.answer("Оплата через CryptoBot подтверждается автоматически, чек не нужен.", show_alert=True)
         return
     if not _is_prepay_payment(order.get("payment", "")):
         await callback.answer("Для этого способа оплаты чек не нужен", show_alert=True)
@@ -1877,13 +2170,8 @@ async def order_receipt_photo(message: Message, state: FSMContext) -> None:
         return
 
     order = get_order(order_id)
-    caption = (
-        f"<b>🧾 Чек от клиента</b>\n"
-        "──────────────\n"
-        f"📦 Заказ: <code>{order_id}</code>\n"
-        f"👤 Клиент: <code>{message.from_user.id}</code>\n"
-        f"💳 Оплата: <b>{order['payment'] if order else '-'}</b>"
-    )
+    items = get_order_items(order_id) if order else []
+    caption = _admin_order_caption(order_id, order, items) if order else f"<b>📦 Заказ {order_id}</b>"
     admin_kb = admin_order_status_kb(
         order_id,
         order["user_id"] if order else None,
@@ -1945,13 +2233,8 @@ async def order_receipt_pdf(message: Message, state: FSMContext) -> None:
         return
 
     order = get_order(order_id)
-    caption = (
-        f"<b>🧾 Чек от клиента</b>\n"
-        "──────────────\n"
-        f"📦 Заказ: <code>{order_id}</code>\n"
-        f"👤 Клиент: <code>{message.from_user.id}</code>\n"
-        f"💳 Оплата: <b>{order['payment'] if order else '-'}</b>"
-    )
+    items = get_order_items(order_id) if order else []
+    caption = _admin_order_caption(order_id, order, items) if order else f"<b>📦 Заказ {order_id}</b>"
     admin_kb = admin_order_status_kb(
         order_id,
         order["user_id"] if order else None,
@@ -3101,6 +3384,7 @@ async def admin_edit_stock(message: Message, state: FSMContext) -> None:
         "<b>✅ Остаток сохранён</b>",
         reply_markup=_admin_edit_back_markup(data),
     )
+    await _notify_low_stock(message.bot, pid, old_stock=old_stock)
     new_product = get_product(pid)
     if old_stock <= 0 and new_product and int(new_product["stock"]) > 0:
         title = new_product.get("name") or "Товар"
@@ -3756,30 +4040,17 @@ async def admin_order_status(callback: CallbackQuery) -> None:
         except Exception:
             pass
 
-    # Опрос качества при доставке
+    # Опрос качества при доставке (с задержкой 1 час)
     if status == "done":
-        for item in items:
-            pid = item.get("product_id")
-            if not pid:
-                continue
-            product = get_product(pid)
-            caption = f"⭐ Оцените качество продукта\n<b>{item['title']}</b>"
-            try:
-                if product and product.get("photo"):
-                    await callback.bot.send_photo(
-                        order["user_id"],
-                        photo=product["photo"],
-                        caption=caption,
-                        reply_markup=product_survey_kb(order_id, pid),
-                    )
-                else:
-                    await callback.bot.send_message(
-                        order["user_id"],
-                        caption,
-                        reply_markup=product_survey_kb(order_id, pid),
-                    )
-            except Exception:
-                pass
+        asyncio.create_task(
+            _send_delivery_survey_after_delay(
+                callback.bot,
+                order_id=order_id,
+                user_id=order["user_id"],
+                items=items,
+                delay_seconds=60 * 60,
+            )
+        )
 
     await callback.answer(f"📌 Статус обновлен: {order['status']}")
 

@@ -1,4 +1,5 @@
 import datetime
+import html
 import os
 import sqlite3
 import tempfile
@@ -10,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from data.config import adm, bot_description, get_default_menu_banner_path, username as bot_username
+from loader import dispatcher
 from keyboards.inline.user_inline import (
     admin_business_hours_kb,
     admin_referral_kb,
@@ -26,7 +28,7 @@ from keyboards.inline.user_inline import (
     support_tickets_list_kb,
     support_ticket_view_kb,
 )
-from handlers.users.shop_state import AdminBusinessHours, AdminNotifications, AdminPayments, AdminReferral, SupportDialog
+from handlers.users.shop_state import AdminBusinessHours, AdminNotifications, AdminPayments, AdminReferral, AdminStockAlerts, SupportDialog
 from utils.set_bot_commands import set_default_commands
 from utils.db_api.shop import get_user_profile as get_shop_user_profile
 from utils.db_api.shop import apply_referral_from_start_payload, ensure_user, get_or_create_referral_code
@@ -35,6 +37,8 @@ from utils.db_api.shop import (
     get_admin_new_order_template,
     get_notify_chat_id,
     get_payment_info,
+    get_cryptobot_token,
+    get_low_stock_threshold,
     get_support_admin_ids,
     get_shop_setting,
     get_shop_stats,
@@ -60,6 +64,8 @@ from utils.db_api.shop import (
     set_notify_chat_id,
     set_payment_enabled,
     set_payment_setting,
+    set_cryptobot_token,
+    set_low_stock_threshold,
     set_start_command_description,
     set_user_status_template,
     business_hours_hint_html,
@@ -76,6 +82,7 @@ from utils.db_api.shop import (
 )
 from utils.db_api.sqlite import get_all_categoriesx
 from utils.db_api.sqlite import path_to_db
+from utils.bot_restart import cancel_restart_request, mark_restart_requested
 from utils.ui_sections import ui_panel, ui_screen
 
 router = Router(name="user_menu")
@@ -96,9 +103,9 @@ def _get_admin_menu_kb(viewer_id: int) -> InlineKeyboardMarkup:
 def _get_admin_settings_kb() -> InlineKeyboardMarkup:
     return admin_settings_inline_kb(
         cod_enabled=is_payment_enabled("cod"),
-        card_enabled=bool(get_payment_info("card")),
-        applepay_enabled=bool(get_payment_info("applepay")),
-        googlepay_enabled=bool(get_payment_info("googlepay")),
+        card_enabled=is_payment_enabled("card"),
+        applepay_enabled=is_payment_enabled("applepay"),
+        googlepay_enabled=is_payment_enabled("googlepay"),
         client_status_notif=is_user_status_notification_enabled(),
         maintenance_enabled=is_maintenance(),
     )
@@ -110,12 +117,14 @@ def _get_admin_settings_notif_kb() -> InlineKeyboardMarkup:
     )
 
 
-def _get_admin_settings_payments_kb() -> InlineKeyboardMarkup:
+def _get_admin_settings_payments_kb(viewer_id: int) -> InlineKeyboardMarkup:
     return admin_settings_payments_inline_kb(
         cod_enabled=is_payment_enabled("cod"),
-        card_enabled=bool(get_payment_info("card")),
-        applepay_enabled=bool(get_payment_info("applepay")),
-        googlepay_enabled=bool(get_payment_info("googlepay")),
+        card_enabled=is_payment_enabled("card"),
+        applepay_enabled=is_payment_enabled("applepay"),
+        googlepay_enabled=is_payment_enabled("googlepay"),
+        crypto_enabled=is_payment_enabled("crypto"),
+        can_manage_crypto_token=is_owner_user(viewer_id),
     )
 
 
@@ -225,6 +234,7 @@ def _admin_settings_payments_text() -> str:
     card = "✅ настроена" if get_payment_info("card") else "➖ не настроена"
     apple = "✅ настроен" if get_payment_info("applepay") else "➖ не настроен"
     google = "✅ настроен" if get_payment_info("googlepay") else "➖ не настроен"
+    crypto = "✅ включён" if is_payment_enabled("crypto") else ("🔴 выключен" if get_cryptobot_token() else "➖ не задан токен")
     return ui_panel(
         emoji="💳",
         title="Настройки оплаты",
@@ -235,6 +245,7 @@ def _admin_settings_payments_text() -> str:
             f"   ⤷ 💳 банковская карта: <b>{card}</b>",
             f"   ⤷ 🍏 Apple Pay: <b>{apple}</b>",
             f"   ⤷ 🤖 Google Pay: <b>{google}</b>",
+            f"   ⤷ 🪙 CryptoBot: <b>{crypto}</b>",
             "",
             "💡 <i>Строки с индикатором 🟢/🔴 ниже переключают доступность у клиента.</i>",
         ],
@@ -983,7 +994,7 @@ async def callback_admin_settings_payments(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback.message,
         _admin_settings_payments_text(),
-        reply_markup=_get_admin_settings_payments_kb(),
+        reply_markup=_get_admin_settings_payments_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -1104,6 +1115,52 @@ async def callback_admin_settings_referral(callback: CallbackQuery, state: FSMCo
         reply_markup=admin_referral_kb(enabled=is_referral_program_enabled(), inviter=inv, referee=ref),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:settings:stock_alerts")
+async def callback_admin_settings_stock_alerts(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.set_state(AdminStockAlerts.threshold)
+    cur = get_low_stock_threshold()
+    await callback.message.answer(
+        "📦 <b>Уведомления по низкому остатку</b>\n\n"
+        f"Текущий порог: <b>{cur}</b> шт\n\n"
+        "Отправьте новое значение (целое число).\n"
+        "Пример: <code>3</code>\n\n"
+        "<i>0 — отключить уведомления.</i>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")]]
+        ),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStockAlerts.threshold)
+async def callback_admin_settings_stock_alerts_set(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    try:
+        v = int(raw)
+    except ValueError:
+        await message.answer(
+            "<b>⚠ Нужно целое число</b>",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")]]
+            ),
+        )
+        return
+    set_low_stock_threshold(v)
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Порог сохранён</b>\n<i>Теперь уведомления будут при остатке ≤ {get_low_stock_threshold()} шт.</i>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")]]
+        ),
+    )
 
 
 @router.callback_query(F.data == "admin:referral:toggle")
@@ -1466,7 +1523,7 @@ async def callback_admin_pay_card(callback: CallbackQuery, state: FSMContext) ->
         "Чтобы отключить — отправьте: <code>off</code>\n\n"
         "📋 <b>Текущие реквизиты:</b>\n"
         f"{current}",
-        reply_markup=_get_admin_settings_payments_kb(),
+        reply_markup=_get_admin_settings_payments_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -1480,7 +1537,11 @@ async def callback_admin_pay_cod_toggle(callback: CallbackQuery) -> None:
     current = is_payment_enabled("cod")
     set_payment_enabled("cod", not current)
     status = "✅ включён" if not current else "❌ выключен"
-    await _safe_edit(callback.message, _admin_settings_payments_text(), reply_markup=_get_admin_settings_payments_kb())
+    await _safe_edit(
+        callback.message,
+        _admin_settings_payments_text(),
+        reply_markup=_get_admin_settings_payments_kb(callback.from_user.id),
+    )
     await callback.answer(f"🚚 Наложенный платёж {status}")
 
 
@@ -1498,7 +1559,7 @@ async def callback_admin_pay_apple(callback: CallbackQuery, state: FSMContext) -
         "Чтобы отключить — отправьте: <code>off</code>\n\n"
         "📋 <b>Текущее значение:</b>\n"
         f"{current}",
-        reply_markup=_get_admin_settings_payments_kb(),
+        reply_markup=_get_admin_settings_payments_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -1517,7 +1578,47 @@ async def callback_admin_pay_google(callback: CallbackQuery, state: FSMContext) 
         "Чтобы отключить — отправьте: <code>off</code>\n\n"
         "📋 <b>Текущее значение:</b>\n"
         f"{current}",
-        reply_markup=_get_admin_settings_payments_kb(),
+        reply_markup=_get_admin_settings_payments_kb(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:pay:crypto:toggle")
+async def callback_admin_pay_crypto_toggle(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    if not get_cryptobot_token():
+        await callback.answer("Сначала задайте CryptoBot API токен", show_alert=True)
+        return
+
+    new_state = not is_payment_enabled("crypto")
+    set_payment_enabled("crypto", new_state)
+    await _safe_edit(
+        callback.message,
+        _admin_settings_payments_text(),
+        reply_markup=_get_admin_settings_payments_kb(callback.from_user.id),
+    )
+    await callback.answer("🪙 CryptoBot включён" if new_state else "🪙 CryptoBot выключен")
+
+
+@router.callback_query(F.data == "admin:pay:crypto_token")
+async def callback_admin_pay_crypto_token(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_user(callback.from_user.id):
+        await callback.answer("Только главный админ может менять API токен", show_alert=True)
+        return
+
+    await state.set_state(AdminPayments.crypto_token)
+    has_token = bool(get_cryptobot_token())
+    cur = "✅ задан" if has_token else "➖ не задан"
+    await callback.message.answer(
+        "🔑 <b>CryptoBot API токен</b>\n\n"
+        "Нужен для автоматического создания счетов и проверки оплаты.\n"
+        f"Текущий: <b>{cur}</b>\n\n"
+        "Отправьте новый токен одной строкой.\n"
+        "Чтобы отключить авто‑счета — отправьте <code>off</code>.",
+        reply_markup=_get_admin_settings_payments_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -1531,7 +1632,10 @@ async def set_pay_card(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("card", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("✅ <b>Реквизиты банковской карты обновлены!</b>", reply_markup=_get_admin_settings_payments_kb())
+    await message.answer(
+        "✅ <b>Реквизиты банковской карты обновлены!</b>",
+        reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+    )
 
 
 @router.message(AdminPayments.applepay)
@@ -1543,7 +1647,10 @@ async def set_pay_apple(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("applepay", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("✅ <b>Настройки Apple Pay обновлены!</b>", reply_markup=_get_admin_settings_payments_kb())
+    await message.answer(
+        "✅ <b>Настройки Apple Pay обновлены!</b>",
+        reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+    )
 
 
 @router.message(AdminPayments.googlepay)
@@ -1555,4 +1662,76 @@ async def set_pay_google(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     set_payment_setting("googlepay", "" if text.lower() == "off" else text)
     await state.clear()
-    await message.answer("✅ <b>Настройки Google Pay обновлены!</b>", reply_markup=_get_admin_settings_payments_kb())
+    await message.answer(
+        "✅ <b>Настройки Google Pay обновлены!</b>",
+        reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+    )
+
+
+@router.message(AdminPayments.crypto)
+async def set_pay_crypto(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    set_payment_setting("crypto", "" if text.lower() == "off" else text)
+    await state.clear()
+    await message.answer(
+        "✅ <b>Настройки CryptoBot обновлены!</b>",
+        reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+    )
+
+
+async def _restart_bot_after_cryptobot_token_change(message: Message) -> None:
+    """Токен в БД уже сохранён; перезапуск процесса — как admin:bot:restart."""
+    await message.answer(
+        "<b>♻️ Перезапуск бота</b>\n──────────────\n"
+        "<i>Токен CryptoBot применён. Останавливаю приём обновлений и запускаю новый процесс…</i>",
+        reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+    )
+    mark_restart_requested()
+    try:
+        await dispatcher.stop_polling()
+    except Exception as exc:
+        cancel_restart_request()
+        try:
+            await message.answer(
+                f"<b>⚠ Не удалось перезапустить бота</b>\n<code>{html.escape(str(exc)[:300])}</code>",
+                reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+            )
+        except Exception:
+            pass
+
+
+@router.message(AdminPayments.crypto_token)
+async def set_pay_crypto_token(message: Message, state: FSMContext) -> None:
+    if not is_owner_user(message.from_user.id):
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    old_token = get_cryptobot_token()
+    if text.lower() == "off":
+        set_cryptobot_token("")
+        await state.clear()
+        await message.answer(
+            "🔕 <b>CryptoBot API токен отключён</b>\n<i>Авто‑счета и авто‑проверка оплат выключены.</i>",
+            reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+        )
+        if old_token.strip():
+            await _restart_bot_after_cryptobot_token_change(message)
+        return
+    if not text or len(text) < 10:
+        await message.answer(
+            "<b>⚠ Похоже на некорректный токен</b>\nОтправьте токен одной строкой или <code>off</code>.",
+            reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+        )
+        return
+    set_cryptobot_token(text)
+    await state.clear()
+    await message.answer(
+        "✅ <b>CryptoBot API токен сохранён</b>\n<i>Теперь бот сможет создавать инвойсы и подтверждать оплату автоматически.</i>",
+        reply_markup=_get_admin_settings_payments_kb(message.from_user.id),
+    )
+    if text.strip() != old_token.strip():
+        await _restart_bot_after_cryptobot_token_change(message)

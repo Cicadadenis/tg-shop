@@ -1,2 +1,3 @@
 aiogram>=3.0,<4.0
 requests>=2.31.0
+crypto-pay-api>=1.6.0

@@ -109,7 +109,7 @@ def product_kb(product_id: int, *, in_wishlist: bool, show_cart_button: bool = F
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def cart_kb(items: list[dict], *, has_promo: bool = False) -> InlineKeyboardMarkup:
+def cart_kb(items: list[dict], *, has_promo: bool = False, can_checkout: bool = True) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for item in items:
         pid = item["position_id"]
@@ -122,7 +122,10 @@ def cart_kb(items: list[dict], *, has_promo: bool = False) -> InlineKeyboardMark
             ]
         )
 
-    rows.append([InlineKeyboardButton(text="✅ Оформить заказ", callback_data="shop:checkout:start")])
+    if can_checkout:
+        rows.append([InlineKeyboardButton(text="✅ Оформить заказ", callback_data="shop:checkout:start")])
+    else:
+        rows.append([InlineKeyboardButton(text="⚠️ Нет способов оплаты", callback_data="shop:checkout:blocked")])
     rows.append([InlineKeyboardButton(text="🏷 Промокод", callback_data="shop:cart:promo")])
     if has_promo:
         rows.append([InlineKeyboardButton(text="✕ Убрать промокод", callback_data="shop:cart:promo:clear")])
@@ -137,7 +140,7 @@ def cart_kb(items: list[dict], *, has_promo: bool = False) -> InlineKeyboardMark
 
 _NEW_STATUSES = {"Новый"}
 _INWORK_STATUSES = {"Оплачен", "Отправлен"}
-_ARCHIVE_STATUSES = {"Доставлен", "Отменен"}
+_ARCHIVE_STATUSES = {"Доставлен", "Отменен", "Удален"}
 
 
 def orders_menu_kb(*, has_new: bool, has_inwork: bool, has_archive: bool, has_receipt_search: bool = False) -> InlineKeyboardMarkup:
@@ -454,12 +457,15 @@ def checkout_delivery_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def checkout_city_payment_kb() -> InlineKeyboardMarkup:
-    """Для доставки 'По городу' — только оплата картой."""
+def checkout_crypto_asset_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Банковская карта", callback_data="shop:pay:card")],
-            [InlineKeyboardButton(text="⬅ Корзина", callback_data="menu:cart")],
+            [
+                InlineKeyboardButton(text="💵 USDT", callback_data="shop:crypto:asset:USDT"),
+                InlineKeyboardButton(text="⚡ TRX", callback_data="shop:crypto:asset:TRX"),
+            ],
+            [InlineKeyboardButton(text="🪙 LTC", callback_data="shop:crypto:asset:LTC")],
+            [InlineKeyboardButton(text="⬅ К способам оплаты", callback_data="shop:crypto:asset:back")],
         ]
     )
 
@@ -558,7 +564,6 @@ def admin_order_status_kb(
     payment_label: str | None = None,
 ) -> InlineKeyboardMarkup:
     status_buttons = {
-        "paid": "✅ Оплачен",
         "shipped": "🚚 Отправлен",
         "done": "📦 Доставлен",
         "cancel": "❌ Отменен",
@@ -572,11 +577,17 @@ def admin_order_status_kb(
     is_cod_payment = "налож" in (payment_label or "").strip().lower()
 
     rows: list[list[InlineKeyboardButton]] = []
-    is_terminal_status = current_status_key in {"done", "cancel"}
-    if not is_terminal_status:
-        if current_status_key == "" and not is_cod_payment:
-            rows.append([InlineKeyboardButton(text=status_buttons["paid"], callback_data=f"admin:order:status:{order_id}:paid")])
+    if receipt_pending:
+        rows.append(
+            [
+                InlineKeyboardButton(text="✅ Подтвердить чек", callback_data=f"admin:order:receipt:{order_id}:approve"),
+                InlineKeyboardButton(text="❌ Отклонить чек", callback_data=f"admin:order:receipt:{order_id}:reject"),
+            ]
+        )
 
+    raw_s = (current_status_raw or "").strip()
+    is_terminal_status = current_status_key in {"done", "cancel"} or raw_s == "Удален"
+    if not is_terminal_status:
         shipping_row: list[InlineKeyboardButton] = []
         if current_status_key != "shipped":
             shipping_row.append(InlineKeyboardButton(text=status_buttons["shipped"], callback_data=f"admin:order:status:{order_id}:shipped"))
@@ -588,13 +599,6 @@ def admin_order_status_kb(
         if current_status_key != "cancel":
             rows.append([InlineKeyboardButton(text=status_buttons["cancel"], callback_data=f"admin:order:status:{order_id}:cancel")])
 
-    if receipt_pending:
-        rows.append(
-            [
-                InlineKeyboardButton(text="✅ Подтвердить чек", callback_data=f"admin:order:receipt:{order_id}:approve"),
-                InlineKeyboardButton(text="❌ Отклонить чек", callback_data=f"admin:order:receipt:{order_id}:reject"),
-            ]
-        )
     if has_receipt:
         rows.append([InlineKeyboardButton(text="🧾 Посмотреть чек", callback_data=f"admin:order:receipt:{order_id}:view")])
     if user_id is not None:

@@ -5,7 +5,9 @@ from handlers import router
 from loader import bot, dispatcher
 from utils.db_api.sqlite import create_bdx
 from utils.cart_reminders import cart_abandon_reminder_loop
+from utils.cryptobot_payments import cryptobot_invoice_watcher_loop
 from utils.db_api.shop import delete_old_closed_tickets
+from utils.order_payment_timeout import prepaid_order_timeout_loop
 from utils.other_func import on_startup_notify
 from utils.bot_restart import consume_restart_request, perform_execl_restart
 from utils.set_bot_commands import set_default_commands
@@ -35,6 +37,8 @@ async def main() -> None:
     await on_startup()
     asyncio.create_task(_cleanup_loop())
     asyncio.create_task(cart_abandon_reminder_loop(bot))
+    asyncio.create_task(cryptobot_invoice_watcher_loop(bot))
+    asyncio.create_task(prepaid_order_timeout_loop())
     try:
         await dispatcher.start_polling(bot)
     finally:

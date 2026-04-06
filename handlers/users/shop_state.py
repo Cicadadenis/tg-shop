@@ -26,6 +26,7 @@ class CheckoutForm(StatesGroup):
     city = State()
     branch = State()
     payment = State()
+    crypto_asset = State()
     bonus_confirm = State()
     # City delivery flow
     city_recip_name = State()
@@ -105,6 +106,12 @@ class AdminPayments(StatesGroup):
     card = State()
     applepay = State()
     googlepay = State()
+    crypto = State()
+    crypto_token = State()
+
+
+class AdminStockAlerts(StatesGroup):
+    threshold = State()
 
 
 class SupportDialog(StatesGroup):
