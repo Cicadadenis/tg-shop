@@ -67,17 +67,27 @@ admin_reply_cancel_kb = InlineKeyboardMarkup(
 )
 
 
-def admin_menu_inline_kb(*, full_access: bool = True) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="🛒 Магазин · каталог · заказы · админка", callback_data="admin:shop")],
-        [InlineKeyboardButton(text="📊 Сводка · бот · клиенты · метрики", callback_data="admin:section:insights")],
-    ]
-    rows.extend(
-        [
-            [InlineKeyboardButton(text="⚙ Настройки", callback_data="admin:settings")],
-            [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:main")],
-        ]
-    )
+def admin_menu_inline_kb(
+    *,
+    full_access: bool = True,
+    show_shop: bool = True,
+    show_insights: bool = True,
+    show_settings: bool = True,
+) -> InlineKeyboardMarkup:
+    if full_access:
+        show_shop = show_insights = show_settings = True
+    rows: list[list[InlineKeyboardButton]] = []
+    if show_shop:
+        rows.append(
+            [InlineKeyboardButton(text="🛒 Магазин · каталог · заказы · админка", callback_data="admin:shop")]
+        )
+    if show_insights:
+        rows.append(
+            [InlineKeyboardButton(text="📊 Сводка · бот · клиенты · метрики", callback_data="admin:section:insights")]
+        )
+    if show_settings:
+        rows.append([InlineKeyboardButton(text="⚙ Настройки", callback_data="admin:settings")])
+    rows.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -118,10 +128,17 @@ def admin_settings_inline_kb(
     *,
     client_status_notif: bool = True,
     maintenance_enabled: bool = False,
+    show_staff_permissions: bool = False,
 ) -> InlineKeyboardMarkup:
     maint_ind = "🟢 ВКЛ" if maintenance_enabled else "🔴 ВЫКЛ"
+    head: list[list[InlineKeyboardButton]] = []
+    if show_staff_permissions:
+        head.append(
+            [InlineKeyboardButton(text="👥 Права персонала", callback_data="admin:settings:staff_perms")]
+        )
     return InlineKeyboardMarkup(
-        inline_keyboard=[
+        inline_keyboard=head
+        + [
             [InlineKeyboardButton(text="🎨 Витрина · /start · главное меню", callback_data="admin:section:appearance")],
             [InlineKeyboardButton(text="🔔 Шаблоны · статусы · лог-чат", callback_data="admin:settings:notif")],
             [InlineKeyboardButton(text="🕐 Время работы", callback_data="admin:settings:business_hours")],
@@ -199,10 +216,17 @@ def admin_settings_payments_inline_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_settings_service_inline_kb(*, can_update_repo: bool = False) -> InlineKeyboardMarkup:
+def admin_settings_service_inline_kb(
+    *, can_update_repo: bool = False, can_manage_database: bool = False
+) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="💾 Бэкап · скачать SQLite", callback_data="admin:db:backup")],
     ]
+    if can_manage_database:
+        rows.append(
+            [InlineKeyboardButton(text="🗑 Удалить БД · бэкап и сброс", callback_data="admin:db:delete_with_backup")]
+        )
+        rows.append([InlineKeyboardButton(text="📤 Загрузить БД из файла", callback_data="admin:db:upload")])
     if can_update_repo:
         rows.append([InlineKeyboardButton(text="🔄 Обновить с Git", callback_data="admin:repo:update")])
         rows.append([InlineKeyboardButton(text="♻️ Перезапустить бота", callback_data="admin:bot:restart")])

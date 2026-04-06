@@ -42,6 +42,97 @@ STATUS_MAP = {
     "deleted": "Удален",
 }
 
+# Права сотрудников (менеджер / техподдержка). Владелец и админ — всё без ограничений.
+STAFF_PERM_ORDER = ("catalog", "payments", "support", "team", "insights", "io", "settings")
+
+STAFF_PERM_LABELS_RU = {
+    "catalog": "Каталог и заказы",
+    "payments": "Оплата и доставка",
+    "support": "Тикеты поддержки",
+    "team": "Команда · промо · рассылка",
+    "insights": "Сводка · клиенты · метрики",
+    "io": "Экспорт и импорт",
+    "settings": "Настройки бота",
+}
+
+
+def _staff_perm_defaults(role: str) -> dict[str, bool]:
+    if role == "manager":
+        return {
+            "catalog": True,
+            "payments": True,
+            "support": True,
+            "team": False,
+            "insights": False,
+            "io": False,
+            "settings": True,
+        }
+    if role == "support":
+        return {k: (k == "support") for k in STAFF_PERM_ORDER}
+    return {k: False for k in STAFF_PERM_ORDER}
+
+
+def _load_staff_permissions_store() -> dict[str, Any]:
+    raw = get_shop_setting("staff_permissions_json", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_staff_permissions_store(store: dict[str, Any]) -> None:
+    set_shop_setting("staff_permissions_json", json.dumps(store, ensure_ascii=False))
+
+
+def get_effective_staff_permissions(telegram_id: int) -> dict[str, bool]:
+    prof = get_user_profile(int(telegram_id))
+    role = (prof.get("role") or "user").strip()
+    if role in ("owner", "admin"):
+        return {k: True for k in STAFF_PERM_ORDER}
+    if role not in ("manager", "support"):
+        return {k: False for k in STAFF_PERM_ORDER}
+    base = _staff_perm_defaults(role)
+    store = _load_staff_permissions_store()
+    snap = store.get(str(int(telegram_id)))
+    if isinstance(snap, dict) and snap:
+        return {k: bool(snap.get(k, base[k])) for k in STAFF_PERM_ORDER}
+    return dict(base)
+
+
+def staff_has_perm(telegram_id: int, perm: str) -> bool:
+    if perm not in STAFF_PERM_ORDER:
+        return False
+    return bool(get_effective_staff_permissions(int(telegram_id)).get(perm))
+
+
+def toggle_staff_perm_for_user(target_uid: int, perm: str) -> bool | None:
+    """Переключает право; только для manager/support. Возвращает новое значение или None."""
+    if perm not in STAFF_PERM_ORDER:
+        return None
+    prof = get_user_profile(int(target_uid))
+    role = (prof.get("role") or "").strip()
+    if role not in ("manager", "support"):
+        return None
+    eff = get_effective_staff_permissions(int(target_uid))
+    eff[perm] = not eff[perm]
+    store = _load_staff_permissions_store()
+    store[str(int(target_uid))] = eff
+    _save_staff_permissions_store(store)
+    return eff[perm]
+
+
+def clear_support_membership(telegram_id: int) -> None:
+    """Убрать ID из списка техподдержки (без проверки роли)."""
+    tid = int(telegram_id)
+    ids = set(get_support_admin_ids())
+    if tid not in ids:
+        return
+    ids.discard(tid)
+    set_shop_setting("support_admin_ids", ",".join(str(i) for i in sorted(ids)))
+
 
 def _status_ru(status: str) -> str:
     if not status:
@@ -219,6 +310,7 @@ def init_shop_tables() -> None:
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('low_stock_threshold', '3')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_cod_enabled', '1')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('support_admin_ids', '')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('staff_permissions_json', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_nova_enabled', '1')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_city_enabled', '1')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_pickup_enabled', '1')")
@@ -1024,7 +1116,7 @@ def get_product_rating(product_id: int) -> dict[str, Any]:
 
 def is_admin_user(telegram_id: int) -> bool:
     profile = get_user_profile(telegram_id)
-    return profile["role"] in {"owner", "admin", "manager"}
+    return profile["role"] in {"owner", "admin", "manager", "support"}
 
 
 def is_privileged_admin(telegram_id: int) -> bool:
@@ -1039,6 +1131,7 @@ def is_owner_user(telegram_id: int) -> bool:
 
 
 def get_admin_ids() -> list[int]:
+    """ID для уведомлений о заказах: без роли support."""
     with sqlite3.connect(path_to_db) as db:
         rows = db.execute(
             """
@@ -1069,7 +1162,7 @@ def is_support_admin(telegram_id: int) -> bool:
 def set_support_admin(telegram_id: int, enabled: bool) -> None:
     user_id = int(telegram_id)
     profile = get_user_profile(user_id)
-    if profile["role"] not in {"owner", "admin", "manager"}:
+    if profile["role"] not in {"owner", "admin", "manager", "support"}:
         return
 
     ids = set(get_support_admin_ids())
@@ -1185,7 +1278,7 @@ def delete_old_closed_tickets(days: int = 7) -> int:
 
 
 def set_user_role(telegram_id: int, role: str, name: str = "") -> None:
-    if role not in {"owner", "admin", "manager", "user"}:
+    if role not in {"owner", "admin", "manager", "support", "user"}:
         return
     ensure_user(telegram_id, name)
     with sqlite3.connect(path_to_db) as db:
@@ -1200,6 +1293,7 @@ def add_admin_user(telegram_id: int, name: str = "") -> None:
 def remove_admin_user(telegram_id: int) -> bool:
     if is_owner_user(telegram_id):
         return False
+    clear_support_membership(telegram_id)
     set_user_role(telegram_id, "user")
     return True
 
@@ -1210,9 +1304,36 @@ def list_admin_users() -> list[dict[str, Any]]:
             """
             SELECT telegram_id, name, phone, address, created_at, role
             FROM storage_shop_users
-            WHERE role IN ('owner', 'admin', 'manager')
-            ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, created_at DESC
+            WHERE role IN ('owner', 'admin', 'manager', 'support')
+            ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END, created_at DESC
             """
+        ).fetchall()
+    return [
+        {
+            "telegram_id": int(row[0]),
+            "name": row[1] or "Без имени",
+            "phone": row[2] or "",
+            "address": row[3] or "",
+            "created_at": row[4] or "",
+            "role": row[5] or "user",
+        }
+        for row in rows
+    ]
+
+
+def list_staff_by_roles(*, roles: tuple[str, ...]) -> list[dict[str, Any]]:
+    if not roles:
+        return []
+    placeholders = ",".join("?" * len(roles))
+    with sqlite3.connect(path_to_db) as db:
+        rows = db.execute(
+            f"""
+            SELECT telegram_id, name, phone, address, created_at, role
+            FROM storage_shop_users
+            WHERE role IN ({placeholders})
+            ORDER BY created_at DESC
+            """,
+            tuple(roles),
         ).fetchall()
     return [
         {

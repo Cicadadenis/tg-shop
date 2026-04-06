@@ -102,6 +102,10 @@ class AdminCatalogImport(StatesGroup):
     file = State()
 
 
+class AdminDatabaseUpload(StatesGroup):
+    file = State()
+
+
 class AdminPayments(StatesGroup):
     card = State()
     applepay = State()

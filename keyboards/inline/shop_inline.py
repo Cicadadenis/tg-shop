@@ -6,8 +6,20 @@ def _role_label(role: str) -> str:
         "owner": "👑 главный",
         "admin": "🛡 админ",
         "manager": "📋 менеджер",
+        "support": "🛟 техподдержка",
         "user": "👤 клиент",
     }.get(role, role)
+
+
+_STAFF_PERM_ROWS: tuple[tuple[str, str], ...] = (
+    ("catalog", "Каталог и заказы"),
+    ("payments", "Оплата и доставка"),
+    ("support", "Тикеты поддержки"),
+    ("team", "Команда · промо · рассылка"),
+    ("insights", "Сводка · клиенты · метрики"),
+    ("io", "Экспорт и импорт"),
+    ("settings", "Настройки бота"),
+)
 
 
 def back_menu_kb(target: str = "menu:main") -> InlineKeyboardMarkup:
@@ -260,6 +272,23 @@ def admin_shop_kb(can_manage_admins: bool = False, *, full_access: bool = True) 
     ]
     if full_access:
         rows.append([InlineKeyboardButton(text="📦 Файлы · CSV заказов · JSON каталога", callback_data="admin:section:io")])
+        rows.append([InlineKeyboardButton(text="👨‍💼 Команда · рассылка · промокоды", callback_data="admin:section:team")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_shop_kb_for_perms(perms: dict[str, bool]) -> InlineKeyboardMarkup:
+    """Витрина магазина в админке по матрице прав (менеджер / техподдержка)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if perms.get("catalog"):
+        rows.append([InlineKeyboardButton(text="🛍 Каталог · заказы · чеки", callback_data="admin:section:catalog")])
+    if perms.get("payments"):
+        rows.append([InlineKeyboardButton(text="💳 Оплата · реквизиты · доставка", callback_data="admin:section:payments")])
+    if perms.get("support"):
+        rows.append([InlineKeyboardButton(text="🛟 Поддержка · тикеты клиентов", callback_data="admin:support_tickets")])
+    if perms.get("io"):
+        rows.append([InlineKeyboardButton(text="📦 Файлы · CSV заказов · JSON каталога", callback_data="admin:section:io")])
+    if perms.get("team"):
         rows.append([InlineKeyboardButton(text="👨‍💼 Команда · рассылка · промокоды", callback_data="admin:section:team")])
     rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:admin")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -626,12 +655,66 @@ def admin_people_kb(users: list[dict], *, back_target: str = "admin:shop", add_a
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def admin_user_staff_pick_kb(user_id: int, *, source: str = "") -> InlineKeyboardMarkup:
+    sfx = f":{source}" if source else ""
+    back = f"admin:user:view:{user_id}{sfx}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Менеджер", callback_data=f"admin:user:staff_set:manager:{user_id}{sfx}")],
+            [InlineKeyboardButton(text="🛟 Техподдержка", callback_data=f"admin:user:staff_set:support:{user_id}{sfx}")],
+            [InlineKeyboardButton(text="⬅ Назад", callback_data=back)],
+        ]
+    )
+
+
+def staff_permissions_editor_kb(
+    target_user_id: int, eff: dict[str, bool], *, role_kind: str = ""
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, title in _STAFF_PERM_ROWS:
+        ind = "🟢" if eff.get(key) else "🔴"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{ind} {title}",
+                    callback_data=f"admin:staff_perm:toggle:{target_user_id}:{key}",
+                )
+            ]
+        )
+    back_data = f"admin:staff_perm:list:{role_kind}" if role_kind else "admin:settings:staff_perms"
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data=back_data)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_staff_role_pick_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Менеджеры", callback_data="admin:staff_perm:list:manager")],
+            [InlineKeyboardButton(text="🛟 Техподдержка", callback_data="admin:staff_perm:list:support")],
+            [InlineKeyboardButton(text="⬅ Назад · настройки", callback_data="admin:settings")],
+        ]
+    )
+
+
+def admin_staff_users_kb(users: list[dict], *, role_kind: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for u in users:
+        uid = u["telegram_id"]
+        nm = (u.get("name") or "")[:20] or str(uid)
+        rows.append(
+            [InlineKeyboardButton(text=f"👤 {nm}", callback_data=f"admin:staff_perm:edit:{uid}:{role_kind}")]
+        )
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="admin:settings:staff_perms")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def admin_user_actions_kb(
     user_id: int,
     *,
     is_admin: bool,
     is_owner: bool,
     is_manager: bool,
+    is_support_role: bool = False,
     can_manage_admins: bool,
     is_support: bool = False,
     back_target: str,
@@ -643,15 +726,19 @@ def admin_user_actions_kb(
         [InlineKeyboardButton(text="🛒 Покупки", callback_data=f"admin:user:orders:{user_id}{suffix}")],
         [InlineKeyboardButton(text="🎁 Выдать Бонус", callback_data=f"admin:user:bonus:{user_id}{suffix}")],
     ]
-    if can_manage_admins and not is_owner and (is_admin or is_manager):
-        if is_support:
+    if can_manage_admins and not is_owner and (is_admin or is_manager or is_support_role):
+        if is_support_role or (is_support and (is_manager or is_admin)):
             rows.append([InlineKeyboardButton(text="🛟 Убрать из техподдержки", callback_data=f"admin:user:support:disable:{user_id}{suffix}")])
-        else:
+        elif is_manager or is_admin:
             rows.append([InlineKeyboardButton(text="🛟 Назначить в техподдержку", callback_data=f"admin:user:support:enable:{user_id}{suffix}")])
-        label = "➖ Убрать из админов" if is_admin else "➖ Снять менеджера"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"admin:user:demote:{user_id}{suffix}")])
-    elif can_manage_admins and not is_owner and not is_admin and not is_manager:
-        rows.append([InlineKeyboardButton(text="📋 Менеджер магазина", callback_data=f"admin:user:manager:{user_id}{suffix}")])
+        if is_admin:
+            rows.append([InlineKeyboardButton(text="➖ Убрать из админов", callback_data=f"admin:user:demote:{user_id}{suffix}")])
+        elif is_manager:
+            rows.append([InlineKeyboardButton(text="➖ Снять менеджера", callback_data=f"admin:user:demote:{user_id}{suffix}")])
+        elif is_support_role:
+            rows.append([InlineKeyboardButton(text="➖ Снять с должности", callback_data=f"admin:user:demote:{user_id}{suffix}")])
+    elif can_manage_admins and not is_owner and not is_admin and not is_manager and not is_support_role:
+        rows.append([InlineKeyboardButton(text="➕ Добавить в штат", callback_data=f"admin:user:staff_menu:{user_id}{suffix}")])
     rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data=back_target)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

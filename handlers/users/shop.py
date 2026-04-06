@@ -40,7 +40,9 @@ from keyboards.inline.shop_inline import (
     admin_promo_until_kb,
     admin_promo_wizard_cancel_kb,
     admin_shop_kb,
+    admin_shop_kb_for_perms,
     admin_user_actions_kb,
+    admin_user_staff_pick_kb,
     cart_kb,
     catalog_kb,
     categories_kb,
@@ -99,6 +101,7 @@ from utils.db_api.shop import (
     get_user_orders,
     get_user_applied_promo,
     get_delivery_settings,
+    get_effective_staff_permissions,
     get_shop_setting,
     set_shop_setting,
     export_catalog,
@@ -108,6 +111,7 @@ from utils.db_api.shop import (
     is_payment_enabled,
     is_privileged_admin,
     is_support_admin,
+    staff_has_perm,
     is_user_status_notification_enabled,
     list_all_orders,
     list_admin_users,
@@ -184,6 +188,11 @@ init_shop_tables()
 
 PER_PAGE = 6
 REVIEWS_PER_PAGE = 5
+
+_PRODUCT_PHOTO_FROM_OTHER_BOT_HTML = (
+    "\n\n⚠️ <i>Товар перенесён из другого бота: старое фото в Telegram недоступно. "
+    "Для дальнейшей работы загрузите фото товаров заново в админке.</i>"
+)
 
 
 def _git_repo_root() -> str:
@@ -298,6 +307,35 @@ def _admin_audit_screen(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     return text, _admin_audit_markup(page, total)
 
 
+def _admin_audit_export_bytes() -> bytes:
+    rows: list[dict[str, object]] = []
+    offset = 0
+    chunk_size = 50
+    while True:
+        chunk = list_admin_audit_log(limit=chunk_size, offset=offset)
+        if not chunk:
+            break
+        rows.extend(chunk)
+        offset += len(chunk)
+        if len(chunk) < chunk_size:
+            break
+
+    if not rows:
+        return "Журнал действий админов пуст.\n".encode("utf-8-sig")
+
+    lines = ["Журнал действий админов", "=" * 80]
+    for idx, row in enumerate(rows, start=1):
+        created_at = str(row.get("created_at") or "")
+        actor_id = int(row.get("actor_id") or 0)
+        action = str(row.get("action") or "")
+        details = str(row.get("details") or "")
+        lines.append(f"{idx}. [{created_at}] actor_id={actor_id} action={action}")
+        if details:
+            lines.append(f"   details: {details}")
+        lines.append("")
+    return "\n".join(lines).encode("utf-8-sig")
+
+
 async def _admin_promo_finish_reply(state: FSMContext, target: Message, *, actor_id: int) -> None:
     data = await state.get_data()
     ok, msg = create_promocode(
@@ -372,6 +410,16 @@ def _is_privileged(user_id: int) -> bool:
     return is_privileged_admin(user_id)
 
 
+async def _require_staff_perm(callback: CallbackQuery, perm: str) -> bool:
+    uid = callback.from_user.id
+    if is_privileged_admin(uid):
+        return True
+    if not staff_has_perm(uid, perm):
+        await callback.answer("Нет доступа к этому разделу", show_alert=True)
+        return False
+    return True
+
+
 async def _notify_low_stock(bot, product_id: int, *, old_stock: int | None = None) -> None:
     try:
         product = get_product(int(product_id))
@@ -419,7 +467,9 @@ async def _notify_low_stock(bot, product_id: int, *, old_stock: int | None = Non
             pass
 
 def _admin_shop_markup(viewer_id: int):
-    return admin_shop_kb(_is_owner(viewer_id), full_access=_is_privileged(viewer_id))
+    if _is_privileged(viewer_id):
+        return admin_shop_kb(_is_owner(viewer_id), full_access=True)
+    return admin_shop_kb_for_perms(get_effective_staff_permissions(viewer_id))
 
 
 def _admin_delivery_settings_caption() -> str:
@@ -457,6 +507,7 @@ def _role_label(role: str) -> str:
         "owner": "Главный админ",
         "admin": "Админ",
         "manager": "Менеджер",
+        "support": "Техподдержка",
         "user": "Клиент",
     }.get(role, role)
 
@@ -656,7 +707,7 @@ async def _render_admin_user_card(message: Message, viewer_id: int, target_user_
     order_count = len(orders)
     total_spent = sum(o["total"] for o in orders)
     bonus = profile.get("bonus", 0)
-    if profile["role"] in {"owner", "admin", "manager"}:
+    if profile["role"] in {"owner", "admin", "manager", "support"}:
         back_target = "admin:admins:list"
     elif source:
         back_target = f"admin:users:list:{source}"
@@ -684,6 +735,7 @@ async def _render_admin_user_card(message: Message, viewer_id: int, target_user_
             is_admin=profile["role"] in {"owner", "admin"},
             is_owner=profile["role"] == "owner",
             is_manager=profile["role"] == "manager",
+            is_support_role=profile["role"] == "support",
             can_manage_admins=_is_owner(viewer_id),
             is_support=is_support_admin(profile["telegram_id"]),
             back_target=back_target,
@@ -906,18 +958,25 @@ async def product_open(callback: CallbackQuery) -> None:
     )
     in_wishlist = wishlist_has(callback.from_user.id, product_id)
 
+    kb = product_kb(product_id, in_wishlist=in_wishlist, has_reviews=has_reviews)
     if product["photo"]:
         await callback.message.delete()
-        await callback.message.answer_photo(
-            product["photo"],
-            caption=caption,
-            reply_markup=product_kb(product_id, in_wishlist=in_wishlist, has_reviews=has_reviews),
-        )
+        try:
+            await callback.message.answer_photo(
+                product["photo"],
+                caption=caption,
+                reply_markup=kb,
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(
+                caption + _PRODUCT_PHOTO_FROM_OTHER_BOT_HTML,
+                reply_markup=kb,
+            )
     else:
         await _safe_edit(
             callback.message,
             caption,
-            reply_markup=product_kb(product_id, in_wishlist=in_wishlist, has_reviews=has_reviews),
+            reply_markup=kb,
         )
 
     await callback.answer()
@@ -2618,6 +2677,11 @@ async def admin_shop(callback: CallbackQuery) -> None:
         return
 
     vid = callback.from_user.id
+    if not is_privileged_admin(vid):
+        p = get_effective_staff_permissions(vid)
+        if not any(p.get(k) for k in ("catalog", "payments", "support", "team", "io")):
+            await callback.answer("Нет доступа к разделу магазина", show_alert=True)
+            return
     await _safe_edit(
         callback.message,
         _admin_shop_screen_text(vid),
@@ -2630,6 +2694,8 @@ async def admin_shop(callback: CallbackQuery) -> None:
 async def admin_section_catalog(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    if not await _require_staff_perm(callback, "catalog"):
         return
     await _safe_edit(
         callback.message,
@@ -2653,6 +2719,8 @@ async def admin_section_appearance(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
+    if not await _require_staff_perm(callback, "settings"):
+        return
     await _safe_edit(
         callback.message,
         ui_screen(
@@ -2673,6 +2741,8 @@ async def admin_section_appearance(callback: CallbackQuery) -> None:
 async def admin_section_payments(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    if not await _require_staff_perm(callback, "payments"):
         return
     await _safe_edit(
         callback.message,
@@ -2696,6 +2766,8 @@ async def admin_section_insights(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
+    if not await _require_staff_perm(callback, "insights"):
+        return
     await _safe_edit(
         callback.message,
         ui_screen(
@@ -2715,8 +2787,7 @@ async def admin_section_insights(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:section:io")
 async def admin_section_io(callback: CallbackQuery) -> None:
-    if not _is_privileged(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not await _require_staff_perm(callback, "io"):
         return
     await _safe_edit(
         callback.message,
@@ -2789,8 +2860,7 @@ async def admin_bot_restart(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:section:team")
 async def admin_section_team(callback: CallbackQuery) -> None:
-    if not _is_privileged(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not await _require_staff_perm(callback, "team"):
         return
     await _safe_edit(
         callback.message,
@@ -2814,6 +2884,8 @@ async def admin_delivery_settings(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
+    if not await _require_staff_perm(callback, "payments"):
+        return
 
     ds = get_delivery_settings()
     await _safe_edit(
@@ -2828,6 +2900,8 @@ async def admin_delivery_settings(callback: CallbackQuery) -> None:
 async def admin_delivery_toggle(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    if not await _require_staff_perm(callback, "payments"):
         return
 
     key = callback.data.split(":")[-1]  # nova / city / pickup
@@ -2850,8 +2924,7 @@ async def admin_delivery_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:catalog:export")
 async def admin_catalog_export(callback: CallbackQuery) -> None:
-    if not _is_privileged(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not await _require_staff_perm(callback, "io"):
         return
 
     await callback.answer("⏳ Подготавливаю файл...")
@@ -2877,8 +2950,7 @@ async def admin_catalog_export(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:catalog:import")
 async def admin_catalog_import_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_privileged(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not await _require_staff_perm(callback, "io"):
         return
 
     await state.set_state(AdminCatalogImport.file)
@@ -3573,7 +3645,6 @@ async def admin_analytics(callback: CallbackQuery) -> None:
         text,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="📜 Открыть журнал", callback_data="admin:audit:log")],
                 [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:insights")],
             ]
         ),
@@ -3603,9 +3674,17 @@ async def admin_audit_log(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
-    text, markup = _admin_audit_screen(0)
-    await _safe_edit(callback.message, text, reply_markup=markup)
-    await callback.answer()
+
+    raw = _admin_audit_export_bytes()
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    file = BufferedInputFile(raw, filename=f"admin_audit_log_{ts}.txt")
+    _audit(callback.from_user.id, "audit.export_txt", f"bytes={len(raw)}")
+    await callback.message.answer_document(
+        file,
+        caption="<b>📥 Журнал действий админов</b>\n<i>Отправлен в виде .txt файла</i>",
+        reply_markup=back_admin_kb("admin:section:insights"),
+    )
+    await callback.answer("Файл отправлен")
 
 
 @router.callback_query(F.data.startswith("admin:audit:page:"))
@@ -4259,19 +4338,45 @@ async def admin_user_promote(callback: CallbackQuery) -> None:
     await callback.answer("Права админа выданы")
 
 
-@router.callback_query(F.data.startswith("admin:user:manager:"))
-async def admin_user_manager(callback: CallbackQuery) -> None:
+@router.callback_query(F.data.startswith("admin:user:staff_menu:"))
+async def admin_user_staff_menu(callback: CallbackQuery) -> None:
     if not _is_owner(callback.from_user.id):
-        await callback.answer("Только главный админ может назначать менеджеров", show_alert=True)
+        await callback.answer("Только главный админ может добавлять в штат", show_alert=True)
         return
-
     parts = callback.data.split(":")
     target_user_id = int(parts[3])
     source = parts[4] if len(parts) > 4 else ""
-    set_user_role(target_user_id, "manager")
-    _audit(callback.from_user.id, "team.manager", f"user={target_user_id}")
+    await _safe_edit(
+        callback.message,
+        "<b>➕ Добавить в штат</b>\n──────────────\n<i>Выберите роль сотрудника.</i>",
+        reply_markup=admin_user_staff_pick_kb(target_user_id, source=source),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:user:staff_set:"))
+async def admin_user_staff_set(callback: CallbackQuery) -> None:
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Только главный админ может добавлять в штат", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    role_kind = parts[3]
+    target_user_id = int(parts[4])
+    source = parts[5] if len(parts) > 5 else ""
+    if role_kind == "manager":
+        set_user_role(target_user_id, "manager")
+        set_support_admin(target_user_id, False)
+        _audit(callback.from_user.id, "team.manager", f"user={target_user_id}")
+        await callback.answer("Назначен менеджером")
+    elif role_kind == "support":
+        set_user_role(target_user_id, "support")
+        set_support_admin(target_user_id, True)
+        _audit(callback.from_user.id, "team.support", f"user={target_user_id}")
+        await callback.answer("Назначен в техподдержку")
+    else:
+        await callback.answer("Ошибка", show_alert=True)
+        return
     await _render_admin_user_card(callback.message, callback.from_user.id, target_user_id, source=source)
-    await callback.answer("Назначен менеджером магазина")
 
 
 @router.callback_query(F.data.startswith("admin:user:demote:"))
@@ -4631,7 +4736,6 @@ async def admin_stats(callback: CallbackQuery) -> None:
         text,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="📜 Журнал действий админов", callback_data="admin:audit:log")],
                 [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:section:insights")],
             ]
         ),

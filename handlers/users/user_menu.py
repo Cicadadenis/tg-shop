@@ -1,6 +1,7 @@
 import datetime
 import html
 import os
+import shutil
 import sqlite3
 import tempfile
 
@@ -12,6 +13,11 @@ from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, Inli
 
 from data.config import adm, bot_description, get_default_menu_banner_path, username as bot_username
 from loader import dispatcher
+from keyboards.inline.shop_inline import (
+    admin_staff_role_pick_kb,
+    admin_staff_users_kb,
+    staff_permissions_editor_kb,
+)
 from keyboards.inline.user_inline import (
     admin_business_hours_kb,
     admin_referral_kb,
@@ -28,7 +34,15 @@ from keyboards.inline.user_inline import (
     support_tickets_list_kb,
     support_ticket_view_kb,
 )
-from handlers.users.shop_state import AdminBusinessHours, AdminNotifications, AdminPayments, AdminReferral, AdminStockAlerts, SupportDialog
+from handlers.users.shop_state import (
+    AdminBusinessHours,
+    AdminDatabaseUpload,
+    AdminNotifications,
+    AdminPayments,
+    AdminReferral,
+    AdminStockAlerts,
+    SupportDialog,
+)
 from utils.set_bot_commands import set_default_commands
 from utils.db_api.shop import get_user_profile as get_shop_user_profile
 from utils.db_api.shop import apply_referral_from_start_payload, ensure_user, get_or_create_referral_code
@@ -46,12 +60,16 @@ from utils.db_api.shop import (
     get_user_status_template,
     get_welcome_message,
     get_main_menu_message,
+    init_shop_tables,
+    get_effective_staff_permissions,
+    staff_has_perm,
+    list_staff_by_roles,
+    toggle_staff_perm_for_user,
     is_admin_user,
     is_payment_enabled,
     is_maintenance,
     is_owner_user,
     is_privileged_admin,
-    is_support_admin,
     toggle_maintenance,
     is_user_status_notification_enabled,
     set_user_status_notification_enabled,
@@ -94,13 +112,32 @@ def _is_admin(user_id: int) -> bool:
     return is_admin_user(user_id)
 
 
+def _settings_access(user_id: int) -> bool:
+    if not _is_admin(user_id):
+        return False
+    return is_privileged_admin(user_id) or staff_has_perm(user_id, "settings")
+
+
+def _support_tickets_access(user_id: int) -> bool:
+    if not _is_admin(user_id):
+        return False
+    return is_privileged_admin(user_id) or staff_has_perm(user_id, "support")
+
+
 def _get_admin_menu_kb(viewer_id: int) -> InlineKeyboardMarkup:
+    if is_privileged_admin(viewer_id):
+        return admin_menu_inline_kb(full_access=True)
+    p = get_effective_staff_permissions(viewer_id)
+    show_shop = any(p.get(k) for k in ("catalog", "payments", "support", "team", "io"))
     return admin_menu_inline_kb(
-        full_access=is_privileged_admin(viewer_id),
+        full_access=False,
+        show_shop=show_shop,
+        show_insights=bool(p.get("insights")),
+        show_settings=bool(p.get("settings")),
     )
 
 
-def _get_admin_settings_kb() -> InlineKeyboardMarkup:
+def _get_admin_settings_kb(viewer_id: int) -> InlineKeyboardMarkup:
     return admin_settings_inline_kb(
         cod_enabled=is_payment_enabled("cod"),
         card_enabled=is_payment_enabled("card"),
@@ -108,6 +145,7 @@ def _get_admin_settings_kb() -> InlineKeyboardMarkup:
         googlepay_enabled=is_payment_enabled("googlepay"),
         client_status_notif=is_user_status_notification_enabled(),
         maintenance_enabled=is_maintenance(),
+        show_staff_permissions=is_owner_user(viewer_id),
     )
 
 
@@ -129,7 +167,14 @@ def _get_admin_settings_payments_kb(viewer_id: int) -> InlineKeyboardMarkup:
 
 
 def _get_admin_settings_service_kb(viewer_id: int) -> InlineKeyboardMarkup:
-    return admin_settings_service_inline_kb(can_update_repo=is_owner_user(viewer_id))
+    owner = is_owner_user(viewer_id)
+    return admin_settings_service_inline_kb(can_update_repo=owner, can_manage_database=owner)
+
+
+def _service_back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅ К сервису", callback_data="admin:settings:service")]]
+    )
 
 
 def _admin_referral_text() -> str:
@@ -621,11 +666,8 @@ async def support_user_message_send(message: Message, state: FSMContext) -> None
 
 @router.callback_query(F.data.startswith("support:reply:"))
 async def support_admin_reply_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-    if not (is_owner_user(callback.from_user.id) or is_support_admin(callback.from_user.id)):
-        await callback.answer("Вы не назначены в техподдержку", show_alert=True)
+    if not _support_tickets_access(callback.from_user.id):
+        await callback.answer("Нет доступа к обращениям поддержки", show_alert=True)
         return
 
     ticket_id = int(callback.data.split(":")[-1])
@@ -649,13 +691,10 @@ async def support_admin_reply_start(callback: CallbackQuery, state: FSMContext) 
 
 @router.message(SupportDialog.admin_reply)
 async def support_admin_reply_send(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
-        await state.clear()
-        return
-    if not (is_owner_user(message.from_user.id) or is_support_admin(message.from_user.id)):
+    if not _support_tickets_access(message.from_user.id):
         await state.clear()
         await message.answer(
-            "<b>🚫 Нет доступа</b>\n\n<i>Вы не в составе службы поддержки.</i>",
+            "<b>🚫 Нет доступа</b>\n\n<i>Нет права на ответы в поддержке.</i>",
             reply_markup=admin_reply_cancel_kb,
         )
         return
@@ -739,8 +778,8 @@ async def support_admin_reply_send(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "admin:support_tickets")
 async def callback_admin_support_tickets(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _support_tickets_access(callback.from_user.id):
+        await callback.answer("Нет доступа к обращениям поддержки", show_alert=True)
         return
 
     tickets = get_support_tickets(status="active")
@@ -766,8 +805,8 @@ async def callback_admin_support_tickets(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:support_tickets:closed")
 async def callback_admin_support_tickets_closed(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _support_tickets_access(callback.from_user.id):
+        await callback.answer("Нет доступа к обращениям поддержки", show_alert=True)
         return
 
     tickets = get_support_tickets(status="closed")
@@ -793,8 +832,8 @@ async def callback_admin_support_tickets_closed(callback: CallbackQuery) -> None
 
 @router.callback_query(F.data.startswith("admin:ticket:close:"))
 async def callback_admin_ticket_close(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _support_tickets_access(callback.from_user.id):
+        await callback.answer("Нет доступа к обращениям поддержки", show_alert=True)
         return
 
     ticket_id = int(callback.data.split(":")[-1])
@@ -817,8 +856,8 @@ async def callback_admin_ticket_close(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("admin:ticket:"))
 async def callback_admin_ticket_view(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _support_tickets_access(callback.from_user.id):
+        await callback.answer("Нет доступа к обращениям поддержки", show_alert=True)
         return
 
     # Skip "admin:ticket:close:" — handled above
@@ -944,16 +983,140 @@ async def callback_admin_bot_info(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:settings")
 async def callback_admin_settings(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await _safe_edit(
         callback.message,
         _admin_settings_text(),
-        reply_markup=_get_admin_settings_kb(),
+        reply_markup=_get_admin_settings_kb(callback.from_user.id),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:settings:staff_perms")
+async def callback_admin_settings_staff_perms(callback: CallbackQuery) -> None:
+    if not is_owner_user(callback.from_user.id):
+        await callback.answer("Только владелец может менять права персонала", show_alert=True)
+        return
+
+    await _safe_edit(
+        callback.message,
+        ui_panel(
+            emoji="👥",
+            title="Права персонала",
+            intro="Выберите роль, затем сотрудника — для каждого можно включить или отключить пункты меню (🟢 да · 🔴 нет).",
+            body_lines=[
+                "📋 <b>Менеджер</b> — доступ к операционным разделам по выбранным правам.",
+                "🛟 <b>Техподдержка</b> — обычно только тикеты; остальное при необходимости включите вручную.",
+            ],
+        ),
+        reply_markup=admin_staff_role_pick_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:staff_perm:list:"))
+async def callback_admin_staff_perm_list(callback: CallbackQuery) -> None:
+    if not is_owner_user(callback.from_user.id):
+        await callback.answer("Только владелец может менять права персонала", show_alert=True)
+        return
+
+    role_kind = callback.data.split(":")[-1]
+    if role_kind not in ("manager", "support"):
+        await callback.answer("Некорректная роль", show_alert=True)
+        return
+
+    users = list_staff_by_roles(roles=(role_kind,))
+    label = "менеджеров" if role_kind == "manager" else "техподдержки"
+    if not users:
+        text = ui_panel(
+            emoji="👥",
+            title="Права персонала",
+            intro=f"Список {label} пуст.",
+            body_lines=["Добавьте сотрудников через карточку клиента: «Добавить в штат»."],
+        )
+    else:
+        text = ui_panel(
+            emoji="👥",
+            title="Права персонала",
+            intro=f"Выберите сотрудника ({label}):",
+            body_lines=[],
+        )
+
+    await _safe_edit(callback.message, text, reply_markup=admin_staff_users_kb(users, role_kind=role_kind))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:staff_perm:edit:"))
+async def callback_admin_staff_perm_edit(callback: CallbackQuery) -> None:
+    if not is_owner_user(callback.from_user.id):
+        await callback.answer("Только владелец может менять права персонала", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 5:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+
+    uid = int(parts[3])
+    role_kind = parts[4]
+    prof = get_shop_user_profile(uid)
+    if (prof.get("role") or "").strip() != role_kind:
+        await callback.answer("Роль изменилась — откройте список снова", show_alert=True)
+        return
+
+    eff = get_effective_staff_permissions(uid)
+    title = "менеджера" if role_kind == "manager" else "техподдержки"
+    nm = (prof.get("name") or "").strip() or str(uid)
+    await _safe_edit(
+        callback.message,
+        ui_panel(
+            emoji="👤",
+            title=f"Права · {title}",
+            intro=f"<b>{html.escape(nm)}</b> <code>{uid}</code>",
+            body_lines=["Нажмите на строку, чтобы переключить доступ."],
+        ),
+        reply_markup=staff_permissions_editor_kb(uid, eff, role_kind=role_kind),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:staff_perm:toggle:"))
+async def callback_admin_staff_perm_toggle(callback: CallbackQuery) -> None:
+    if not is_owner_user(callback.from_user.id):
+        await callback.answer("Только владелец может менять права персонала", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 5:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+
+    uid = int(parts[3])
+    perm_key = parts[4]
+    new_val = toggle_staff_perm_for_user(uid, perm_key)
+    if new_val is None:
+        await callback.answer("Не удалось переключить право", show_alert=True)
+        return
+
+    prof = get_shop_user_profile(uid)
+    role_kind = (prof.get("role") or "").strip()
+    eff = get_effective_staff_permissions(uid)
+    title = "менеджера" if role_kind == "manager" else "техподдержки"
+    nm = (prof.get("name") or "").strip() or str(uid)
+    await _safe_edit(
+        callback.message,
+        ui_panel(
+            emoji="👤",
+            title=f"Права · {title}",
+            intro=f"<b>{html.escape(nm)}</b> <code>{uid}</code>",
+            body_lines=["Нажмите на строку, чтобы переключить доступ."],
+        ),
+        reply_markup=staff_permissions_editor_kb(uid, eff, role_kind=role_kind),
+    )
+    await callback.answer("Сохранено")
 
 
 @router.callback_query(F.data == "admin:maintenance:toggle")
@@ -966,15 +1129,15 @@ async def callback_admin_maintenance_toggle(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback.message,
         _admin_settings_text(),
-        reply_markup=_get_admin_settings_kb(),
+        reply_markup=_get_admin_settings_kb(callback.from_user.id),
     )
     await callback.answer("🛠 Техработы ВКЛ — клиенты не попадут в магазин" if on else "✅ Техработы ВЫКЛ — витрина снова для всех", show_alert=True)
 
 
 @router.callback_query(F.data == "admin:settings:notif")
 async def callback_admin_settings_notif(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await _safe_edit(
@@ -987,8 +1150,8 @@ async def callback_admin_settings_notif(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:settings:payments")
 async def callback_admin_settings_payments(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await _safe_edit(
@@ -1001,8 +1164,8 @@ async def callback_admin_settings_payments(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:settings:service")
 async def callback_admin_settings_service(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await _safe_edit(
@@ -1013,6 +1176,7 @@ async def callback_admin_settings_service(callback: CallbackQuery) -> None:
             intro="Инструменты для обслуживания данных — используйте перед крупными изменениями.",
             groups=[
                 ("💾", "Бэкап базы", "Скачать копию SQLite одним файлом"),
+                ("🗑 · 📤", "Удаление и загрузка БД", "Только владелец: сброс с автобэкапом или замена файла из Telegram"),
                 ("🔄", "Обновить с Git", "Подтянуть изменения из репозитория (только владелец)"),
                 ("♻️", "Перезапуск", "Новый процесс Python — нужен после обновления файлов (только владелец)"),
             ],
@@ -1024,8 +1188,8 @@ async def callback_admin_settings_service(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:settings:business_hours")
 async def callback_admin_settings_business_hours(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.clear()
     await _safe_edit(
@@ -1038,8 +1202,8 @@ async def callback_admin_settings_business_hours(callback: CallbackQuery, state:
 
 @router.callback_query(F.data == "admin:bhours:toggle")
 async def callback_admin_bhours_toggle(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     set_business_hours_enabled(not is_business_hours_restriction_enabled())
     await _safe_edit(
@@ -1052,8 +1216,8 @@ async def callback_admin_bhours_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:bhours:start")
 async def callback_admin_bhours_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.set_state(AdminBusinessHours.start_time)
     hs, _ = get_business_hours_bounds()
@@ -1071,8 +1235,8 @@ async def callback_admin_bhours_start(callback: CallbackQuery, state: FSMContext
 
 @router.callback_query(F.data == "admin:bhours:end")
 async def callback_admin_bhours_end(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.set_state(AdminBusinessHours.end_time)
     _, he = get_business_hours_bounds()
@@ -1090,8 +1254,8 @@ async def callback_admin_bhours_end(callback: CallbackQuery, state: FSMContext) 
 
 @router.callback_query(F.data == "admin:bhours:cancel")
 async def callback_admin_bhours_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.clear()
     await _safe_edit(
@@ -1104,8 +1268,8 @@ async def callback_admin_bhours_cancel(callback: CallbackQuery, state: FSMContex
 
 @router.callback_query(F.data == "admin:settings:referral")
 async def callback_admin_settings_referral(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.clear()
     inv, ref = get_referral_bonus_amounts()
@@ -1119,8 +1283,8 @@ async def callback_admin_settings_referral(callback: CallbackQuery, state: FSMCo
 
 @router.callback_query(F.data == "admin:settings:stock_alerts")
 async def callback_admin_settings_stock_alerts(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.set_state(AdminStockAlerts.threshold)
     cur = get_low_stock_threshold()
@@ -1139,7 +1303,7 @@ async def callback_admin_settings_stock_alerts(callback: CallbackQuery, state: F
 
 @router.message(AdminStockAlerts.threshold)
 async def callback_admin_settings_stock_alerts_set(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
     raw = (message.text or "").strip()
@@ -1165,8 +1329,8 @@ async def callback_admin_settings_stock_alerts_set(message: Message, state: FSMC
 
 @router.callback_query(F.data == "admin:referral:toggle")
 async def callback_admin_referral_toggle(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     set_referral_program_enabled(not is_referral_program_enabled())
     inv, ref = get_referral_bonus_amounts()
@@ -1180,8 +1344,8 @@ async def callback_admin_referral_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:referral:inviter")
 async def callback_admin_referral_inviter(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.set_state(AdminReferral.inviter_bonus)
     inv, _ = get_referral_bonus_amounts()
@@ -1199,8 +1363,8 @@ async def callback_admin_referral_inviter(callback: CallbackQuery, state: FSMCon
 
 @router.callback_query(F.data == "admin:referral:referee")
 async def callback_admin_referral_referee(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.set_state(AdminReferral.referee_bonus)
     _, ref = get_referral_bonus_amounts()
@@ -1218,8 +1382,8 @@ async def callback_admin_referral_referee(callback: CallbackQuery, state: FSMCon
 
 @router.callback_query(F.data == "admin:referral:cancel")
 async def callback_admin_referral_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
     await state.clear()
     inv, ref = get_referral_bonus_amounts()
@@ -1233,7 +1397,7 @@ async def callback_admin_referral_cancel(callback: CallbackQuery, state: FSMCont
 
 @router.message(AdminReferral.inviter_bonus, F.text)
 async def admin_referral_inviter_save(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
     raw = (message.text or "").strip()
@@ -1252,7 +1416,7 @@ async def admin_referral_inviter_save(message: Message, state: FSMContext) -> No
 
 @router.message(AdminReferral.referee_bonus, F.text)
 async def admin_referral_referee_save(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
     raw = (message.text or "").strip()
@@ -1271,7 +1435,7 @@ async def admin_referral_referee_save(message: Message, state: FSMContext) -> No
 
 @router.message(AdminBusinessHours.start_time, F.text)
 async def admin_business_hours_set_start(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
     ok, err = set_business_hours_time(start=(message.text or "").strip())
@@ -1289,7 +1453,7 @@ async def admin_business_hours_set_start(message: Message, state: FSMContext) ->
 
 @router.message(AdminBusinessHours.end_time, F.text)
 async def admin_business_hours_set_end(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
     ok, err = set_business_hours_time(end=(message.text or "").strip())
@@ -1307,8 +1471,8 @@ async def admin_business_hours_set_end(message: Message, state: FSMContext) -> N
 
 @router.callback_query(F.data == "admin:notif:new")
 async def callback_admin_notif_new(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await state.set_state(AdminNotifications.admin_new_order_template)
@@ -1324,8 +1488,8 @@ async def callback_admin_notif_new(callback: CallbackQuery, state: FSMContext) -
 
 @router.callback_query(F.data == "admin:notif:status")
 async def callback_admin_notif_status(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await state.set_state(AdminNotifications.user_status_template)
@@ -1341,8 +1505,8 @@ async def callback_admin_notif_status(callback: CallbackQuery, state: FSMContext
 
 @router.callback_query(F.data == "admin:notif:chat")
 async def callback_admin_notif_chat(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await state.set_state(AdminNotifications.notify_chat_id)
@@ -1357,8 +1521,8 @@ async def callback_admin_notif_chat(callback: CallbackQuery, state: FSMContext) 
 
 @router.callback_query(F.data == "admin:notif:start_cmd")
 async def callback_admin_notif_start_cmd(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await state.set_state(AdminNotifications.start_command_description)
@@ -1374,8 +1538,8 @@ async def callback_admin_notif_start_cmd(callback: CallbackQuery, state: FSMCont
 
 @router.callback_query(F.data == "admin:notif:client_toggle")
 async def callback_admin_notif_client_toggle(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     set_user_status_notification_enabled(not is_user_status_notification_enabled())
@@ -1389,8 +1553,8 @@ async def callback_admin_notif_client_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:db:backup")
 async def callback_admin_db_backup(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1407,9 +1571,7 @@ async def callback_admin_db_backup(callback: CallbackQuery) -> None:
                 intro="Файл SQLite готов к сохранению на вашем устройстве.",
                 body_lines=[f"🗓 <b>Метка времени:</b> <code>{stamp}</code>"],
             ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⬅ К сервису", callback_data="admin:settings:service")]]
-            ),
+            reply_markup=_service_back_kb(),
         )
         await callback.answer("✅ Бэкап отправлен")
     except Exception:
@@ -1422,9 +1584,259 @@ async def callback_admin_db_backup(callback: CallbackQuery) -> None:
             pass
 
 
+def _is_valid_sqlite_file(file_path: str) -> bool:
+    try:
+        with sqlite3.connect(file_path) as conn:
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+    except sqlite3.Error:
+        return False
+    return True
+
+
+_DB_UPLOAD_MAX_BYTES = 80 * 1024 * 1024
+
+
+@router.callback_query(F.data == "admin:db:delete_with_backup")
+async def callback_admin_db_delete_with_backup(callback: CallbackQuery) -> None:
+    if not is_owner_user(callback.from_user.id):
+        await callback.answer("Только владелец", show_alert=True)
+        return
+    if not os.path.isfile(path_to_db):
+        await callback.answer("Файл базы не найден", show_alert=True)
+        return
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(tempfile.gettempdir(), f"shop_before_delete_{stamp}.sqlite")
+    try:
+        with sqlite3.connect(path_to_db) as src, sqlite3.connect(backup_path) as dst:
+            src.backup(dst)
+
+        await callback.message.answer_document(
+            FSInputFile(backup_path, filename=f"shop_backup_BEFORE_DELETE_{stamp}.sqlite"),
+            caption=ui_panel(
+                emoji="⚠️",
+                title="Копия перед удалением",
+                intro="Сохраните файл. Далее рабочая база будет удалена и создана пустая.",
+                body_lines=[f"🗓 <code>{stamp}</code>"],
+            ),
+            reply_markup=_service_back_kb(),
+        )
+    except Exception:
+        await callback.answer("❌ Не удалось снять бэкап", show_alert=True)
+        try:
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+        except Exception:
+            pass
+        return
+    finally:
+        try:
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+        except Exception:
+            pass
+
+    try:
+        os.remove(path_to_db)
+    except OSError:
+        await callback.message.answer(
+            "⚠️ <b>Не удалось удалить файл базы</b>\n──────────────\n"
+            "Файл, вероятно, занят процессом. Сохраните присланный бэкап, остановите бота и удалите файл вручную, "
+            f"затем запустите снова — таблицы создадутся автоматически.\n\n<code>{html.escape(path_to_db)}</code>",
+            reply_markup=_service_back_kb(),
+        )
+        await callback.answer()
+        return
+
+    init_shop_tables()
+    await callback.message.answer(
+        "✅ <b>База сброшена</b>\n──────────────\n"
+        "Создана новая пустая база с таблицами. <b>Рекомендуется перезапустить бота.</b>",
+        reply_markup=_service_back_kb(),
+    )
+    await callback.answer("Готово")
+
+
+@router.callback_query(F.data == "admin:db:upload")
+async def callback_admin_db_upload_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_user(callback.from_user.id):
+        await callback.answer("Только владелец", show_alert=True)
+        return
+    await state.set_state(AdminDatabaseUpload.file)
+    await callback.message.answer(
+        "📤 <b>Загрузка базы</b>\n──────────────\n"
+        "Отправьте файл <code>.sqlite</code> или <code>.db</code> <b>как документ</b>.\n\n"
+        "Сначала будет сделан и отправлен бэкап текущей базы, затем файл будет заменён.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:db:upload_cancel")]]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:db:upload_cancel")
+async def callback_admin_db_upload_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_user(callback.from_user.id):
+        await callback.answer()
+        return
+    await state.clear()
+    await callback.message.answer("Отменено.", reply_markup=_service_back_kb())
+    await callback.answer()
+
+
+@router.message(AdminDatabaseUpload.file, F.document)
+async def admin_db_upload_file(message: Message, state: FSMContext) -> None:
+    if not is_owner_user(message.from_user.id):
+        await state.clear()
+        return
+
+    doc = message.document
+    if not doc.file_name:
+        await message.answer("Укажите имя файла с расширением .sqlite или .db", reply_markup=_service_back_kb())
+        await state.clear()
+        return
+
+    low = doc.file_name.lower()
+    if not (low.endswith(".sqlite") or low.endswith(".db")):
+        await message.answer(
+            "<b>Нужен файл</b> с расширением <code>.sqlite</code> или <code>.db</code>.",
+            reply_markup=_service_back_kb(),
+        )
+        await state.clear()
+        return
+
+    if doc.file_size and doc.file_size > _DB_UPLOAD_MAX_BYTES:
+        await message.answer(
+            f"<b>Слишком большой файл</b> (лимит {_DB_UPLOAD_MAX_BYTES // (1024 * 1024)} МБ).",
+            reply_markup=_service_back_kb(),
+        )
+        await state.clear()
+        return
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    tmp_upload = os.path.join(tempfile.gettempdir(), f"shop_upload_{stamp}_{message.from_user.id}.sqlite")
+
+    try:
+        file_info = await message.bot.get_file(doc.file_id)
+        downloaded = await message.bot.download_file(file_info.file_path)
+        raw = downloaded.read()
+        with open(tmp_upload, "wb") as f:
+            f.write(raw)
+    except Exception as exc:
+        await message.answer(
+            f"<b>Не удалось скачать файл</b>\n<code>{html.escape(str(exc)[:400])}</code>",
+            reply_markup=_service_back_kb(),
+        )
+        await state.clear()
+        return
+
+    if not _is_valid_sqlite_file(tmp_upload):
+        try:
+            os.remove(tmp_upload)
+        except Exception:
+            pass
+        await message.answer("<b>Файл не похож на SQLite</b>", reply_markup=_service_back_kb())
+        await state.clear()
+        return
+
+    db_abs = os.path.abspath(path_to_db)
+    os.makedirs(os.path.dirname(db_abs) or ".", exist_ok=True)
+
+    pre_backup = os.path.join(tempfile.gettempdir(), f"shop_before_upload_{stamp}.sqlite")
+    try:
+        if os.path.isfile(db_abs):
+            with sqlite3.connect(db_abs) as src, sqlite3.connect(pre_backup) as dst:
+                src.backup(dst)
+            await message.answer_document(
+                FSInputFile(pre_backup, filename=f"shop_backup_BEFORE_UPLOAD_{stamp}.sqlite"),
+                caption=ui_panel(
+                    emoji="💾",
+                    title="Бэкап перед заменой",
+                    intro="Текущая база сохранена. Далее будет подставлен загруженный файл.",
+                    body_lines=[f"🗓 <code>{stamp}</code>"],
+                ),
+                reply_markup=_service_back_kb(),
+            )
+    except Exception as exc:
+        try:
+            os.remove(tmp_upload)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(pre_backup):
+                os.remove(pre_backup)
+        except Exception:
+            pass
+        await message.answer(
+            f"<b>Не удалось снять бэкап текущей базы</b>\n<code>{html.escape(str(exc)[:400])}</code>",
+            reply_markup=_service_back_kb(),
+        )
+        await state.clear()
+        return
+    finally:
+        try:
+            if os.path.exists(pre_backup):
+                os.remove(pre_backup)
+        except Exception:
+            pass
+
+    swap = db_abs + ".was_replaced"
+    try:
+        if os.path.isfile(db_abs):
+            os.replace(db_abs, swap)
+        shutil.copy2(tmp_upload, db_abs)
+    except Exception as exc:
+        if os.path.isfile(swap):
+            try:
+                os.replace(swap, db_abs)
+            except OSError:
+                pass
+        try:
+            os.remove(tmp_upload)
+        except Exception:
+            pass
+        await message.answer(
+            f"<b>Не удалось заменить файл базы</b>\n<code>{html.escape(str(exc)[:400])}</code>",
+            reply_markup=_service_back_kb(),
+        )
+        await state.clear()
+        return
+    else:
+        if os.path.isfile(swap):
+            try:
+                os.remove(swap)
+            except OSError:
+                pass
+
+    try:
+        os.remove(tmp_upload)
+    except Exception:
+        pass
+
+    init_shop_tables()
+    await state.clear()
+    await message.answer(
+        "✅ <b>База заменена</b>\n──────────────\n"
+        "Таблицы проверены/обновлены. <b>Рекомендуется перезапустить бота.</b>",
+        reply_markup=_service_back_kb(),
+    )
+
+
+@router.message(AdminDatabaseUpload.file)
+async def admin_db_upload_wrong_kind(message: Message, state: FSMContext) -> None:
+    if not is_owner_user(message.from_user.id):
+        return
+    await message.answer(
+        "Отправьте файл базы <b>как документ</b> (.sqlite или .db).",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="admin:db:upload_cancel")]]
+        ),
+    )
+
+
 @router.message(AdminNotifications.admin_new_order_template)
 async def set_admin_new_order_tpl(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
 
@@ -1443,7 +1855,7 @@ async def set_admin_new_order_tpl(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminNotifications.user_status_template)
 async def set_user_status_tpl(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
 
@@ -1462,7 +1874,7 @@ async def set_user_status_tpl(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminNotifications.notify_chat_id)
 async def set_notify_chat(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
 
@@ -1491,7 +1903,7 @@ async def set_notify_chat(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminNotifications.start_command_description)
 async def set_start_cmd_description(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
 
@@ -1511,8 +1923,8 @@ async def set_start_cmd_description(message: Message, state: FSMContext) -> None
 
 @router.callback_query(F.data == "admin:pay:card")
 async def callback_admin_pay_card(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await state.set_state(AdminPayments.card)
@@ -1530,8 +1942,8 @@ async def callback_admin_pay_card(callback: CallbackQuery, state: FSMContext) ->
 
 @router.callback_query(F.data == "admin:pay:cod:toggle")
 async def callback_admin_pay_cod_toggle(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     current = is_payment_enabled("cod")
@@ -1547,8 +1959,8 @@ async def callback_admin_pay_cod_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:pay:applepay")
 async def callback_admin_pay_apple(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await state.set_state(AdminPayments.applepay)
@@ -1566,8 +1978,8 @@ async def callback_admin_pay_apple(callback: CallbackQuery, state: FSMContext) -
 
 @router.callback_query(F.data == "admin:pay:googlepay")
 async def callback_admin_pay_google(callback: CallbackQuery, state: FSMContext) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     await state.set_state(AdminPayments.googlepay)
@@ -1585,8 +1997,8 @@ async def callback_admin_pay_google(callback: CallbackQuery, state: FSMContext) 
 
 @router.callback_query(F.data == "admin:pay:crypto:toggle")
 async def callback_admin_pay_crypto_toggle(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if not _settings_access(callback.from_user.id):
+        await callback.answer("Нет доступа к настройкам", show_alert=True)
         return
 
     if not get_cryptobot_token():
@@ -1625,7 +2037,7 @@ async def callback_admin_pay_crypto_token(callback: CallbackQuery, state: FSMCon
 
 @router.message(AdminPayments.card)
 async def set_pay_card(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
 
@@ -1640,7 +2052,7 @@ async def set_pay_card(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminPayments.applepay)
 async def set_pay_apple(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
 
@@ -1655,7 +2067,7 @@ async def set_pay_apple(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminPayments.googlepay)
 async def set_pay_google(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
 
@@ -1670,7 +2082,7 @@ async def set_pay_google(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminPayments.crypto)
 async def set_pay_crypto(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not _settings_access(message.from_user.id):
         await state.clear()
         return
 
