@@ -2906,7 +2906,7 @@ async def admin_delivery_toggle(callback: CallbackQuery) -> None:
 
     key = callback.data.split(":")[-1]  # nova / city / pickup
     setting_key = f"delivery_{key}_enabled"
-    current = get_shop_setting(setting_key, "1")
+    current = get_shop_setting(setting_key, "0")
     new_value = "0" if current == "1" else "1"
     set_shop_setting(setting_key, new_value)
     _audit(callback.from_user.id, "settings.delivery", f"{key}={new_value}")

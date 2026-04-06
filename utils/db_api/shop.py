@@ -305,15 +305,15 @@ def init_shop_tables() -> None:
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_applepay_info', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_googlepay_info', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_crypto_info', '')")
-        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_crypto_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_crypto_enabled', '0')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('cryptobot_token', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('low_stock_threshold', '3')")
-        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_cod_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('payment_cod_enabled', '0')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('support_admin_ids', '')")
         db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('staff_permissions_json', '')")
-        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_nova_enabled', '1')")
-        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_city_enabled', '1')")
-        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_pickup_enabled', '1')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_nova_enabled', '0')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_city_enabled', '0')")
+        db.execute("INSERT OR IGNORE INTO storage_shop_settings(key, value) VALUES ('delivery_pickup_enabled', '0')")
 
         db.execute(
             """
@@ -618,11 +618,11 @@ def delete_text_menu(menu_id: str) -> None:
 
 
 def get_delivery_settings() -> dict[str, bool]:
-    """Возвращает словарь вида {'nova': True, 'city': True, 'pickup': True}."""
+    """Возвращает словарь вида {'nova': bool, 'city': bool, 'pickup': bool}. По умолчанию всё выключено."""
     return {
-        "nova": get_shop_setting("delivery_nova_enabled", "1") == "1",
-        "city": get_shop_setting("delivery_city_enabled", "1") == "1",
-        "pickup": get_shop_setting("delivery_pickup_enabled", "1") == "1",
+        "nova": get_shop_setting("delivery_nova_enabled", "0") == "1",
+        "city": get_shop_setting("delivery_city_enabled", "0") == "1",
+        "pickup": get_shop_setting("delivery_pickup_enabled", "0") == "1",
     }
 
 
@@ -734,7 +734,7 @@ def render_template(template: str, context: dict[str, Any]) -> str:
 
 def get_payment_settings() -> dict[str, str]:
     return {
-        "cod": "1" if get_shop_setting("payment_cod_enabled", "1") != "0" else "0",
+        "cod": "1" if get_shop_setting("payment_cod_enabled", "0") != "0" else "0",
         "card": get_shop_setting("payment_card_info", "").strip(),
         "applepay": get_shop_setting("payment_applepay_info", "").strip(),
         "googlepay": get_shop_setting("payment_googlepay_info", "").strip(),
@@ -778,11 +778,11 @@ def payment_label(method: str) -> str:
 
 def is_payment_enabled(method: str) -> bool:
     if method == "cod":
-        return get_shop_setting("payment_cod_enabled", "1") != "0"
+        return get_shop_setting("payment_cod_enabled", "0") != "0"
     if method == "crypto":
         if not get_cryptobot_token():
             return False
-        return get_shop_setting("payment_crypto_enabled", "1") != "0"
+        return get_shop_setting("payment_crypto_enabled", "0") != "0"
     return bool(get_payment_info(method))
 
 
